@@ -1,0 +1,8 @@
+Stockfish.js is licensed under the GNU General Public License version 3 (GPLv3).
+
+Copyright (c) 2026, Chess.com, LLC.
+
+Official project:
+https://github.com/nmrugg/stockfish.js
+
+Human Chess Insight does not modify the Stockfish engine binary. The deployment workflow retrieves the official stockfish@19.0.0 package and publishes the lite single-threaded JS/WASM files as part of the GitHub Pages static artifact.

@@ -1,0 +1,10 @@
+Human Chess Insight uses third-party open-source software:
+
+1. Stockfish.js / Stockfish 19
+   Copyright (c) 2026, Chess.com, LLC.
+   License: GPLv3.
+   The GitHub Pages build downloads the official npm package stockfish@19.0.0 during deployment.
+
+2. chess.js
+   Loaded in the browser from jsDelivr at runtime.
+   License: BSD-2-Clause.
