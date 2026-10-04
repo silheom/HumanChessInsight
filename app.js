@@ -12,7 +12,15 @@ const els = {
   nextBtn: $("nextBtn"), lastBtn: $("lastBtn")
 };
 
-const EXAMPLE = `[Event "Human Chess Insight Demo"]\n[Site "Local"]\n[Date "2026.01.01"]\n[Round "1"]\n[White "White"]\n[Black "Black"]\n[Result "*"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 *`;
+const EXAMPLE = `[Event "Human Chess Insight Demo"]
+[Site "Local"]
+[Date "2026.01.01"]
+[Round "1"]
+[White "White"]
+[Black "Black"]
+[Result "*"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 *`;
 
 const ENGINE_PATH = new URL("stockfish/stockfish-19-lite-single.js", import.meta.url).toString();
 
@@ -129,9 +137,7 @@ function whiteScore(score, turn) {
 }
 
 function formatScore(value) {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "—";
-  }
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
 
   if (Math.abs(value) >= 99) {
     return value > 0 ? "+M" : "−M";
@@ -188,6 +194,7 @@ function cancelCurrentAnalysis() {
   if (!currentAnalysis) return;
 
   const old = currentAnalysis;
+
   currentAnalysis = null;
 
   clearTimeout(old.timeout);
@@ -254,7 +261,10 @@ function analyzeFen(fen, depth = 10) {
               ? Number(tokens[multiPvIndex + 1])
               : 1;
 
-          const score = whiteScore(parseScore(tokens), turn);
+          const score = whiteScore(
+            parseScore(tokens),
+            turn
+          );
 
           const pv =
             pvIndex >= 0
@@ -287,6 +297,7 @@ function analyzeFen(fen, depth = 10) {
             .map(([, value]) => value);
 
           analysisCache.set(fen, result);
+
           resolve(result);
         }
       }
@@ -388,7 +399,7 @@ function renderMoves() {
 
 
 /* =========================================================
-   사람의 관점 - 기물 활동 분석
+   인간 관점 분석
    ========================================================= */
 
 const PIECE_NAMES = {
@@ -422,29 +433,21 @@ const START_SQUARES = {
   }
 };
 
-function squareName(row, col) {
-  return "abcdefgh"[col] + String(8 - row);
+function squareName(square) {
+  if (!square) return "";
+
+  return square[0].toUpperCase() + square.slice(1);
 }
 
-function findOwnPiece(c, color, type, square) {
-  const board = c.board();
-
-  for (let row = 0; row < 8; row++) {
-    for (let col = 0; col < 8; col++) {
-      const piece = board[row][col];
-
+function findOwnPiece(board, color, type) {
+  for (const row of board) {
+    for (const piece of row) {
       if (
         piece &&
         piece.color === color &&
-        piece.type === type &&
-        (!square || squareName(row, col) === square)
+        piece.type === type
       ) {
-        return {
-          piece,
-          square: squareName(row, col),
-          row,
-          col
-        };
+        return piece;
       }
     }
   }
@@ -452,24 +455,26 @@ function findOwnPiece(c, color, type, square) {
   return null;
 }
 
-function findPieces(c, color, type) {
+function findPieces(board, color, type) {
   const result = [];
-  const board = c.board();
 
-  for (let row = 0; row < 8; row++) {
-    for (let col = 0; col < 8; col++) {
-      const piece = board[row][col];
+  board.forEach((row, ri) => {
+    row.forEach((piece, ci) => {
+      if (
+        piece &&
+        piece.color === color &&
+        piece.type === type
+      ) {
+        const file = String.fromCharCode(97 + ci);
+        const rank = 8 - ri;
 
-      if (piece && piece.color === color && piece.type === type) {
         result.push({
           piece,
-          square: squareName(row, col),
-          row,
-          col
+          square: `${file}${rank}`
         });
       }
-    }
-  }
+    });
+  });
 
   return result;
 }
@@ -478,9 +483,9 @@ function isStartingSquare(color, type, square) {
   return START_SQUARES[color]?.[type]?.includes(square);
 }
 
-function getLegalMobility(c, square) {
+function getLegalMobility(chess, square) {
   try {
-    return c.moves({
+    return chess.moves({
       square,
       verbose: true
     }).length;
@@ -489,36 +494,36 @@ function getLegalMobility(c, square) {
   }
 }
 
-function getFirstBlockingPiece(c, square, dr, dc) {
-  const file = "abcdefgh".indexOf(square[0]);
+function getFirstBlockingPiece(board, square, dr, dc) {
+  const file = square.charCodeAt(0) - 97;
   const rank = Number(square[1]);
 
-  let row = 8 - rank + dr;
-  let col = file + dc;
+  let r = 8 - rank;
+  let c = file;
+
+  r += dr;
+  c += dc;
 
   while (
-    row >= 0 &&
-    row < 8 &&
-    col >= 0 &&
-    col < 8
+    r >= 0 &&
+    r < 8 &&
+    c >= 0 &&
+    c < 8
   ) {
-    const piece = c.board()[row][col];
+    const piece = board[r][c];
 
     if (piece) {
-      return {
-        piece,
-        square: squareName(row, col)
-      };
+      return piece;
     }
 
-    row += dr;
-    col += dc;
+    r += dr;
+    c += dc;
   }
 
   return null;
 }
 
-function bishopBlockingReason(c, info) {
+function bishopBlockingReason(board, square, color) {
   const directions = [
     [-1, -1],
     [-1, 1],
@@ -526,37 +531,29 @@ function bishopBlockingReason(c, info) {
     [1, 1]
   ];
 
-  const blockers = [];
+  let blockedByPawn = 0;
 
   for (const [dr, dc] of directions) {
     const blocker = getFirstBlockingPiece(
-      c,
-      info.square,
+      board,
+      square,
       dr,
       dc
     );
 
     if (
       blocker &&
-      blocker.piece.color === info.piece.color &&
-      blocker.piece.type === "p"
+      blocker.color === color &&
+      blocker.type === "p"
     ) {
-      blockers.push(blocker.square);
+      blockedByPawn++;
     }
   }
 
-  if (blockers.length === 0) return null;
-
-  const color = COLOR_NAMES[info.piece.color];
-
-  if (blockers.length === 1) {
-    return `${color}의 ${info.square} 비숍은 자신의 ${blockers[0]} 폰에 막혀 있어 현재 활동 범위가 제한되어 있습니다.`;
-  }
-
-  return `${color}의 ${info.square} 비숍은 자신의 폰들에 막혀 있어 현재 활동할 수 있는 대각선이 제한되어 있습니다.`;
+  return blockedByPawn;
 }
 
-function rookBlockingReason(c, info) {
+function rookBlockingReason(board, square, color) {
   const directions = [
     [-1, 0],
     [1, 0],
@@ -566,127 +563,292 @@ function rookBlockingReason(c, info) {
 
   for (const [dr, dc] of directions) {
     const blocker = getFirstBlockingPiece(
-      c,
-      info.square,
+      board,
+      square,
       dr,
       dc
     );
 
     if (
       blocker &&
-      blocker.piece.color === info.piece.color &&
-      blocker.piece.type === "p"
+      blocker.color === color &&
+      blocker.type === "p"
     ) {
-      return `${COLOR_NAMES[info.piece.color]}의 ${info.square} 룩은 ${blocker.square}의 자기 폰 뒤에 있어 아직 활동할 수 있는 공간이 제한되어 있습니다.`;
+      return true;
     }
   }
 
-  return null;
+  return false;
 }
 
-function describePieceActivity(c) {
-  const color = c.turn();
+function describePieceActivity(chess) {
+  const board = chess.board();
+  const color = chess.turn();
   const colorName = COLOR_NAMES[color];
 
-  const pieces = [];
+  const knights = findPieces(board, color, "n");
+  const bishops = findPieces(board, color, "b");
+  const rooks = findPieces(board, color, "r");
 
-  for (const type of ["n", "b", "r", "q"]) {
-    findPieces(c, color, type).forEach(info => {
-      pieces.push({
-        ...info,
-        type,
-        mobility: getLegalMobility(c, info.square)
-      });
-    });
+  /* 1. 아직 전개되지 않은 나이트 */
+  for (const item of knights) {
+    if (isStartingSquare(color, "n", item.square)) {
+      return `${colorName}의 ${squareName(item.square)} 나이트가 아직 출발 위치에 머물러 있어 중앙에서 활동하지 못하고 있습니다. 나이트를 전개해 중앙 통제와 다른 기물의 활동에 참여시키는 것이 좋습니다.`;
+    }
   }
 
-  /*
-   * 1순위:
-   * 아직 출발 위치에 있는 나이트/비숍
-   */
-  const undevelopedMinor = pieces.filter(info =>
-    ["n", "b"].includes(info.type) &&
-    isStartingSquare(color, info.type, info.square)
-  );
+  /* 2. 비숍을 자기 폰이 막고 있는 경우 */
+  for (const item of bishops) {
+    const blocked = bishopBlockingReason(
+      board,
+      item.square,
+      color
+    );
 
-  for (const info of undevelopedMinor) {
-    if (info.type === "b") {
-      const blocked = bishopBlockingReason(c, info);
+    if (blocked > 0) {
+      const mobility = getLegalMobility(
+        chess,
+        item.square
+      );
 
-      if (blocked) {
-        return blocked;
+      if (mobility <= 2) {
+        return `${colorName}의 ${squareName(item.square)} 비숍은 자신의 폰에 막혀 있어 현재 활동 범위가 매우 제한되어 있습니다. 비숍이 사용할 대각선을 열어주는 것이 중요한 후보가 될 수 있습니다.`;
       }
-    }
 
-    if (info.type === "n") {
-      return `${colorName}의 ${info.square} 나이트가 아직 출발 위치에 머물러 있어 중앙에서 활동하지 못하고 있습니다. 나이트를 전개해 중앙 통제와 다른 기물의 활동에 참여시키는 것이 좋습니다.`;
-    }
-
-    if (info.type === "b") {
-      return `${colorName}의 ${info.square} 비숍이 아직 전개되지 않았습니다. 비숍의 대각선을 열어 기물 전체의 전개를 마무리하는 것이 좋습니다.`;
+      return `${colorName}의 ${squareName(item.square)} 비숍은 자신의 폰에 일부 막혀 있어 활동 범위가 제한되어 있습니다. 폰을 전진시키거나 구조를 바꿔 비숍의 대각선을 열 수 있는지 살펴볼 필요가 있습니다.`;
     }
   }
 
-  /*
-   * 2순위:
-   * 비숍이 자기 폰에 막혀 있는 경우
-   */
-  const bishops = pieces.filter(info => info.type === "b");
-
-  for (const bishop of bishops) {
-    const blocked = bishopBlockingReason(c, bishop);
-
-    if (blocked) {
-      return blocked;
+  /* 3. 룩이 자기 폰 뒤에 갇혀 있는 경우 */
+  for (const item of rooks) {
+    if (rookBlockingReason(
+      board,
+      item.square,
+      color
+    )) {
+      return `${colorName}의 ${squareName(item.square)} 룩은 자신의 폰 뒤에 있어 아직 활동할 수 있는 공간이 제한되어 있습니다. 열린 파일이나 반열린 파일로 룩을 연결하는 것이 좋은 장기 계획이 될 수 있습니다.`;
     }
   }
 
-  /*
-   * 3순위:
-   * 룩이 자기 폰 뒤에 갇혀 있는 경우
-   */
-  const rooks = pieces.filter(info => info.type === "r");
+  /* 4. 움직임이 거의 없는 나이트 */
+  for (const item of knights) {
+    const mobility = getLegalMobility(
+      chess,
+      item.square
+    );
 
-  for (const rook of rooks) {
-    const blocked = rookBlockingReason(c, rook);
-
-    if (blocked) {
-      return blocked;
+    if (mobility <= 1) {
+      return `${colorName}의 ${squareName(item.square)} 나이트는 현재 이동할 수 있는 칸이 거의 없어 활동성이 낮습니다. 더 좋은 전초기지나 중앙의 활동적인 칸을 확보할 수 있는지 살펴보는 것이 좋습니다.`;
     }
   }
 
-  /*
-   * 4순위:
-   * 나이트의 이동 가능 칸이 매우 적은 경우
-   */
-  const knights = pieces.filter(info => info.type === "n");
-
-  for (const knight of knights) {
-    if (knight.mobility <= 1) {
-      return `${colorName}의 ${knight.square} 나이트는 현재 이동할 수 있는 칸이 매우 제한되어 있어 활동성이 낮습니다. 주변 폰 구조를 바꾸거나 더 좋은 전초기지를 확보하는 방법을 고려할 수 있습니다.`;
-    }
-  }
-
-  /*
-   * 5순위:
-   * 전반적으로 기물들이 어느 정도 전개된 경우
-   */
-  if (pieces.length > 0) {
-    const averageMobility =
-      pieces.reduce((sum, piece) => sum + piece.mobility, 0) /
-      pieces.length;
-
-    if (averageMobility >= 4) {
-      return `${colorName}의 주요 기물들이 비교적 활발하게 배치되어 있습니다. 현재는 특정 기물의 전개보다 상대의 약점과 다음 계획을 살펴보는 것이 중요합니다.`;
-    }
-  }
-
-  return `${colorName}의 기물 배치는 아직 뚜렷한 문제를 보이지 않습니다. 각 기물이 중앙과 주요 공격선에서 얼마나 활동하고 있는지 살펴보세요.`;
+  /* 5. 전체적으로 활동성이 괜찮은 경우 */
+  return `${colorName}의 주요 기물들은 현재 비교적 활동할 수 있는 위치에 있습니다. 다음 수에서는 단순히 기물을 움직이기보다 상대보다 더 좋은 활동 범위를 확보하는 수를 찾아보는 것이 좋습니다.`;
 }
 
 
 /* =========================================================
-   사람의 관점 - 현재 요소 표시
+   킹의 안전 분석
+   ========================================================= */
+
+function getKingInfo(chess, color) {
+  const board = chess.board();
+  const kings = findPieces(board, color, "k");
+
+  if (!kings.length) return null;
+
+  return kings[0];
+}
+
+function getKingZoneSquares(square) {
+  if (!square) return [];
+
+  const file = square.charCodeAt(0) - 97;
+  const rank = Number(square[1]) - 1;
+
+  const result = [];
+
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      if (dr === 0 && dc === 0) continue;
+
+      const r = rank + dr;
+      const c = file + dc;
+
+      if (
+        r >= 0 &&
+        r < 8 &&
+        c >= 0 &&
+        c < 8
+      ) {
+        result.push(
+          `${String.fromCharCode(97 + c)}${r + 1}`
+        );
+      }
+    }
+  }
+
+  return result;
+}
+
+function countKingDefenders(chess, color, kingSquare) {
+  let count = 0;
+
+  const zone = getKingZoneSquares(kingSquare);
+  const board = chess.board();
+
+  for (const square of zone) {
+    const file = square.charCodeAt(0) - 97;
+    const rank = 8 - Number(square[1]);
+
+    const piece = board[rank]?.[file];
+
+    if (
+      piece &&
+      piece.color === color
+    ) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+function countKingPawnShield(chess, color, kingSquare) {
+  const board = chess.board();
+
+  if (!kingSquare) return 0;
+
+  const file = kingSquare.charCodeAt(0) - 97;
+  const rank = Number(kingSquare[1]);
+
+  const direction = color === "w" ? 1 : -1;
+
+  let count = 0;
+
+  for (let dc = -1; dc <= 1; dc++) {
+    const c = file + dc;
+    const r = rank - 1 + direction;
+
+    if (
+      r >= 0 &&
+      r < 8 &&
+      c >= 0 &&
+      c < 8
+    ) {
+      const piece = board[r][c];
+
+      if (
+        piece &&
+        piece.color === color &&
+        piece.type === "p"
+      ) {
+        count++;
+      }
+    }
+  }
+
+  return count;
+}
+
+function isKingOnStartingSquare(color, square) {
+  return color === "w"
+    ? square === "e1"
+    : square === "e8";
+}
+
+function countEnemyLongRangePieces(chess, color) {
+  const enemy = color === "w" ? "b" : "w";
+  const board = chess.board();
+
+  let score = 0;
+
+  const queens = findPieces(board, enemy, "q");
+  const rooks = findPieces(board, enemy, "r");
+  const bishops = findPieces(board, enemy, "b");
+
+  score += queens.length * 2;
+  score += rooks.length;
+  score += bishops.length;
+
+  return score;
+}
+
+function describeKingSafety(chess) {
+  const side = chess.turn();
+  const opponent = side === "w" ? "b" : "w";
+
+  const sideName = COLOR_NAMES[side];
+
+  const king = getKingInfo(chess, side);
+
+  if (!king) {
+    return `${sideName} 킹의 위치를 확인할 수 없습니다.`;
+  }
+
+  /* 현재 체크 */
+  if (chess.isCheck()) {
+    return `${sideName} 킹은 현재 체크를 받고 있습니다. 지금은 일반적인 기물 활동보다 먼저 체크를 해결하고 킹의 안전을 확보하는 것이 최우선입니다.`;
+  }
+
+  const defenders = countKingDefenders(
+    chess,
+    side,
+    king.square
+  );
+
+  const pawnShield = countKingPawnShield(
+    chess,
+    side,
+    king.square
+  );
+
+  const longRangePressure =
+    countEnemyLongRangePieces(
+      chess,
+      side
+    );
+
+  const kingOnStart =
+    isKingOnStartingSquare(
+      side,
+      king.square
+    );
+
+  /* 킹 주변 방어가 충분한 경우 */
+  if (
+    pawnShield >= 2 &&
+    defenders >= 2 &&
+    kingOnStart
+  ) {
+    return `${sideName} 킹은 현재 비교적 안전한 편입니다. 킹 주변의 폰과 방어 기물이 갖춰져 있어 당장 킹을 직접적으로 흔들기 어렵습니다. 지금은 킹을 움직이기보다 다른 기물의 활동성과 중앙 상황에 집중할 여지가 있습니다.`;
+  }
+
+  /* 폰 방패가 약한 경우 */
+  if (pawnShield <= 1) {
+    return `${sideName} 킹 주변의 폰 방패가 약해져 있습니다. 당장 공격받고 있지는 않지만 상대의 퀸이나 룩이 킹 쪽으로 접근하면 위험이 커질 수 있으므로 킹 주변을 보강하는 것이 중요합니다.`;
+  }
+
+  /* 방어 기물이 적은 경우 */
+  if (defenders <= 1) {
+    return `${sideName} 킹 주변에 방어 기물이 많지 않습니다. 현재 즉각적인 위협은 크지 않지만 상대 기물이 킹 주변에 모이면 방어가 어려워질 수 있으므로 공격받기 전에 대응할 필요가 있습니다.`;
+  }
+
+  /* 킹이 중앙에 남아 있고 장거리 기물이 많은 경우 */
+  if (
+    kingOnStart &&
+    longRangePressure >= 3
+  ) {
+    return `${sideName} 킹이 아직 중앙에 남아 있고 상대의 퀸·룩·비숍 같은 장거리 기물이 충분히 활동할 수 있습니다. 중앙이 열리면 킹의 위험도가 빠르게 올라갈 수 있으므로 캐슬링이나 중앙을 닫는 계획을 고려할 만합니다.`;
+  }
+
+  /* 기본적인 안전 */
+  return `${sideName} 킹은 현재 즉각적인 공격을 받고 있지는 않아 비교적 버틸 수 있는 상태입니다. 다만 킹 주변의 방어와 상대 기물의 접근 가능성을 계속 확인하면서 다음 계획을 선택하는 것이 좋습니다.`;
+}
+
+
+/* =========================================================
+   인간 관점 요소 표시
    ========================================================= */
 
 function renderFactors(fen) {
@@ -717,7 +879,11 @@ function renderFactors(fen) {
       ? "백"
       : "흑";
 
-  const activityText = describePieceActivity(c);
+  const activityText =
+    describePieceActivity(c);
+
+  const kingSafetyText =
+    describeKingSafety(c);
 
   els.humanFactors.innerHTML = [
     [
@@ -734,9 +900,7 @@ function renderFactors(fen) {
 
     [
       "킹 안전",
-      c.isCheck()
-        ? "현재 체크 상태입니다."
-        : "킹 주변의 안전과 상대의 공격 가능성을 확인하세요."
+      kingSafetyText
     ],
 
     [
@@ -751,14 +915,28 @@ function renderFactors(fen) {
     .join("");
 }
 
+
+/* =========================================================
+   엔진 분석 결과 표시
+   ========================================================= */
+
 function renderAnalysis(result) {
   const position = positions[currentPly];
-  const evaluation = result.lines[0]?.score ?? null;
 
-  els.evalValue.textContent = formatScore(evaluation);
-  els.positionInsight.textContent = scoreLabel(evaluation);
-  els.depthValue.textContent = result.depth || "—";
+  const evaluation =
+    result.lines[0]?.score ?? null;
+
+  els.evalValue.textContent =
+    formatScore(evaluation);
+
+  els.positionInsight.textContent =
+    scoreLabel(evaluation);
+
+  els.depthValue.textContent =
+    result.depth || "—";
+
   els.progressBar.style.width = "100%";
+
   els.candidateList.innerHTML = "";
 
   const labels = [
@@ -773,43 +951,52 @@ function renderAnalysis(result) {
     "평가를 크게 훼손하지 않으면서 실전에서 이해하기 쉬운 선택지입니다."
   ];
 
-  result.lines.slice(0, 3).forEach((line, index) => {
-    const san = uciToSan(
-      position.fen,
-      line.pv[0] || ""
-    );
+  result.lines
+    .slice(0, 3)
+    .forEach((line, index) => {
+      const san = uciToSan(
+        position.fen,
+        line.pv[0] || ""
+      );
 
-    els.candidateList.insertAdjacentHTML(
-      "beforeend",
-      `<div class="candidate">
-        <div class="candidateTop">
-          <span class="candidateName">
-            ${index + 1}. ${san} · ${labels[index]}
-          </span>
-          <span class="candidateScore">
-            ${formatScore(line.score)}
-          </span>
-        </div>
-        <div class="candidateDesc">
-          ${descriptions[index]}
-        </div>
-      </div>`
-    );
-  });
+      els.candidateList.insertAdjacentHTML(
+        "beforeend",
+        `<div class="candidate">
+          <div class="candidateTop">
+            <span class="candidateName">
+              ${index + 1}. ${san} · ${labels[index]}
+            </span>
+            <span class="candidateScore">
+              ${formatScore(line.score)}
+            </span>
+          </div>
+          <div class="candidateDesc">
+            ${descriptions[index]}
+          </div>
+        </div>`
+      );
+    });
 
   renderFactors(position.fen);
 }
 
-async function selectPly(ply) {
-  currentPly = Math.max(
-    0,
-    Math.min(
-      positions.length - 1,
-      ply
-    )
-  );
 
-  const position = positions[currentPly];
+/* =========================================================
+   수 이동 / 화면
+   ========================================================= */
+
+async function selectPly(ply) {
+  currentPly =
+    Math.max(
+      0,
+      Math.min(
+        positions.length - 1,
+        ply
+      )
+    );
+
+  const position =
+    positions[currentPly];
 
   renderBoard(position.fen);
   renderMoves();
@@ -820,12 +1007,19 @@ async function selectPly(ply) {
   els.positionLabel.textContent =
     currentPly === 0
       ? "시작 포지션"
-      : `${Math.ceil(currentPly / 2)}${currentPly % 2 ? ". " : "… "}${position.san}`;
+      : `${Math.ceil(currentPly / 2)}${
+          currentPly % 2 ? ". " : "… "
+        }${position.san}`;
 
-  els.firstBtn.disabled = currentPly === 0;
-  els.prevBtn.disabled = currentPly === 0;
+  els.firstBtn.disabled =
+    currentPly === 0;
+
+  els.prevBtn.disabled =
+    currentPly === 0;
+
   els.nextBtn.disabled =
     currentPly === positions.length - 1;
+
   els.lastBtn.disabled =
     currentPly === positions.length - 1;
 
@@ -833,23 +1027,27 @@ async function selectPly(ply) {
 
   renderProgress(0, 0);
 
-  els.evalValue.textContent = "분석 중…";
+  els.evalValue.textContent =
+    "분석 중…";
+
   els.candidateList.innerHTML = "";
 
   renderFactors(position.fen);
 
   try {
-    const result = await analyzeFen(
-      position.fen,
-      10
-    );
+    const result =
+      await analyzeFen(
+        position.fen,
+        10
+      );
 
     if (ply === currentPly) {
       renderAnalysis(result);
     }
   } catch (error) {
     if (
-      error.message !== "이전 분석이 취소되었습니다." &&
+      error.message !==
+        "이전 분석이 취소되었습니다." &&
       ply === currentPly
     ) {
       showError(
@@ -874,9 +1072,12 @@ async function startGame() {
   let chess = new Chess();
 
   try {
-    chess.loadPgn(text, {
-      strict: false
-    });
+    chess.loadPgn(
+      text,
+      {
+        strict: false
+      }
+    );
   } catch {
     showError(
       "PGN을 읽을 수 없습니다. 수순 형식과 PGN 태그를 확인해주세요."
@@ -884,8 +1085,11 @@ async function startGame() {
     return;
   }
 
-  positions = buildPositions(chess);
+  positions =
+    buildPositions(chess);
+
   currentPly = 0;
+
   analysisCache.clear();
 
   els.inputView.hidden = true;
@@ -897,8 +1101,14 @@ async function startGame() {
   renderMoves();
 
   await initEngine();
+
   await selectPly(0);
 }
+
+
+/* =========================================================
+   버튼
+   ========================================================= */
 
 els.exampleBtn.onclick = () => {
   els.pgnInput.value = EXAMPLE;
@@ -922,16 +1132,23 @@ els.backBtn.onclick = () => {
   els.inputView.hidden = false;
 };
 
-els.firstBtn.onclick = () =>
-  selectPly(0);
+els.firstBtn.onclick =
+  () => selectPly(0);
 
-els.prevBtn.onclick = () =>
-  selectPly(currentPly - 1);
+els.prevBtn.onclick =
+  () => selectPly(currentPly - 1);
 
-els.nextBtn.onclick = () =>
-  selectPly(currentPly + 1);
+els.nextBtn.onclick =
+  () => selectPly(currentPly + 1);
 
-els.lastBtn.onclick = () =>
-  selectPly(positions.length - 1);
+els.lastBtn.onclick =
+  () => selectPly(
+    positions.length - 1
+  );
+
+
+/* =========================================================
+   시작
+   ========================================================= */
 
 initEngine().catch(() => {});
