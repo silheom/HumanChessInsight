@@ -1,5 +1,40 @@
 import { Chess } from "https://cdn.jsdelivr.net/npm/chess.js@1.4.0/+esm";
 
+/*
+ * Human Chess Insight
+ * STEP 1 — New analysis architecture
+ *
+ * 유지:
+ * - PGN 입력
+ * - 체스판
+ * - 수순 이동
+ * - Stockfish
+ * - 엔진 평가
+ * - MultiPV 3
+ *
+ * 새 구조:
+ * POSITION
+ * → GAME PHASE
+ * → POSITION SNAPSHOT
+ * → MATERIAL
+ *
+ * 이후 단계:
+ * → MINOR PIECES
+ * → PAWN STRUCTURE
+ * → WEAK SQUARES
+ * → SPACE
+ * → CENTER
+ * → OPEN FILES
+ * → DEVELOPMENT / INITIATIVE
+ * → KING SAFETY
+ * → DOMINANT IMBALANCE
+ * → COUNTERPLAY
+ * → FANTASY POSITION
+ * → CANDIDATES
+ * → STOCKFISH VALIDATION
+ * → HUMAN EXPLANATION
+ */
+
 const $ = id => document.getElementById(id);
 
 const els = {
@@ -39,20 +74,32 @@ const EXAMPLE = `[Event "Human Chess Insight Demo"]
 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 *`;
 
 const ENGINE_PATH =
-  new URL("stockfish/stockfish-19-lite-single.js", import.meta.url).toString();
+  new URL(
+    "stockfish/stockfish-19-lite-single.js",
+    import.meta.url
+  ).toString();
 
 let engine = null;
 let engineReady = false;
 let engineInitPromise = null;
+
 let currentAnalysis = null;
 let analysisToken = 0;
+
 let positions = [];
 let currentPly = 0;
+
 let analysisCache = new Map();
+
+
+/* =========================================================
+   UI / ENGINE
+   ========================================================= */
 
 function setStatus(text, type = "loading") {
   els.engineStatus.textContent = text;
-  els.engineStatus.className = `status ${type}`;
+  els.engineStatus.className =
+    `status ${type}`;
 }
 
 function showError(text) {
@@ -73,100 +120,142 @@ function renderProgress(percent, depth = 0) {
     depth ? String(depth) : "—";
 }
 
+
+/* =========================================================
+   STOCKFISH
+   ========================================================= */
+
 function initEngine() {
-  if (engineInitPromise) return engineInitPromise;
+  if (engineInitPromise) {
+    return engineInitPromise;
+  }
 
-  engineInitPromise = new Promise((resolve, reject) => {
-    setStatus("Stockfish 로딩 중…", "loading");
-
-    try {
-      engine = new Worker(ENGINE_PATH);
-    } catch (e) {
-      reject(e);
-      return;
-    }
-
-    let phase = "boot";
-
-    const timer = setTimeout(() => {
-      reject(
-        new Error("Stockfish 로딩 시간이 초과되었습니다.")
+  engineInitPromise =
+    new Promise((resolve, reject) => {
+      setStatus(
+        "Stockfish 로딩 중…",
+        "loading"
       );
-    }, 30000);
 
-    engine.onerror = event => {
-      clearTimeout(timer);
-      reject(
-        new Error(
-          event?.message || "Stockfish Worker 오류"
-        )
-      );
-    };
-
-    engine.onmessage = event => {
-      const line =
-        typeof event.data === "string"
-          ? event.data.trim()
-          : "";
-
-      if (!line) return;
-
-      if (
-        line === "uciok" &&
-        phase === "boot"
-      ) {
-        phase = "waiting-ready";
-
-        engine.postMessage(
-          "setoption name MultiPV value 3"
-        );
-
-        engine.postMessage("isready");
+      try {
+        engine =
+          new Worker(ENGINE_PATH);
+      } catch (e) {
+        reject(e);
         return;
       }
 
-      if (
-        line === "readyok" &&
-        phase === "waiting-ready"
-      ) {
+      let phase = "boot";
+
+      const timer =
+        setTimeout(() => {
+          reject(
+            new Error(
+              "Stockfish 로딩 시간이 초과되었습니다."
+            )
+          );
+        }, 30000);
+
+      engine.onerror = event => {
         clearTimeout(timer);
 
-        phase = "ready";
-        engineReady = true;
+        reject(
+          new Error(
+            event?.message ||
+            "Stockfish Worker 오류"
+          )
+        );
+      };
+
+      engine.onmessage = event => {
+        const line =
+          typeof event.data === "string"
+            ? event.data.trim()
+            : "";
+
+        if (!line) {
+          return;
+        }
+
+        if (
+          line === "uciok" &&
+          phase === "boot"
+        ) {
+          phase = "waiting-ready";
+
+          engine.postMessage(
+            "setoption name MultiPV value 3"
+          );
+
+          engine.postMessage(
+            "isready"
+          );
+
+          return;
+        }
+
+        if (
+          line === "readyok" &&
+          phase === "waiting-ready"
+        ) {
+          clearTimeout(timer);
+
+          phase = "ready";
+          engineReady = true;
+
+          setStatus(
+            "Stockfish 준비 완료",
+            "ready"
+          );
+
+          resolve();
+          return;
+        }
+
+        if (currentAnalysis) {
+          currentAnalysis.onLine(line);
+        }
+      };
+
+      engine.postMessage("uci");
+    })
+      .catch(error => {
+        engineReady = false;
 
         setStatus(
-          "Stockfish 준비 완료",
-          "ready"
+          "엔진 오류",
+          "error"
         );
 
-        resolve();
-        return;
-      }
-
-      if (currentAnalysis) {
-        currentAnalysis.onLine(line);
-      }
-    };
-
-    engine.postMessage("uci");
-  }).catch(error => {
-    engineReady = false;
-    setStatus("엔진 오류", "error");
-    throw error;
-  });
+        throw error;
+      });
 
   return engineInitPromise;
 }
 
+
+/* =========================================================
+   ENGINE SCORE
+   ========================================================= */
+
 function parseScore(tokens) {
-  const i = tokens.indexOf("score");
+  const i =
+    tokens.indexOf("score");
 
-  if (i < 0) return null;
+  if (i < 0) {
+    return null;
+  }
 
-  const kind = tokens[i + 1];
-  const value = Number(tokens[i + 2]);
+  const kind =
+    tokens[i + 1];
 
-  if (!kind || Number.isNaN(value)) {
+  const value =
+    Number(tokens[i + 2]);
+
+  if (
+    !kind ||
+    Number.isNaN(value)
+  ) {
     return null;
   }
 
@@ -188,22 +277,30 @@ function parseScore(tokens) {
 }
 
 function whiteScore(score, turn) {
-  if (!score) return null;
+  if (!score) {
+    return null;
+  }
 
   if (score.type === "cp") {
     return (
-      (turn === "w"
-        ? score.raw
-        : -score.raw) / 100
+      (
+        turn === "w"
+          ? score.raw
+          : -score.raw
+      ) / 100
     );
   }
 
   const sign =
-    score.raw > 0 ? 1 : -1;
+    score.raw > 0
+      ? 1
+      : -1;
 
-  return turn === "w"
-    ? sign * 100
-    : -sign * 100;
+  return (
+    turn === "w"
+      ? sign * 100
+      : -sign * 100
+  );
 }
 
 function formatScore(value) {
@@ -215,17 +312,24 @@ function formatScore(value) {
     return "—";
   }
 
-  if (Math.abs(value) >= 99) {
-    return value > 0 ? "+M" : "−M";
+  if (
+    Math.abs(value) >= 99
+  ) {
+    return value > 0
+      ? "+M"
+      : "−M";
   }
 
   return `${
-    value >= 0 ? "+" : "−"
+    value >= 0
+      ? "+"
+      : "−"
   }${Math.abs(value).toFixed(1)}`;
 }
 
 function scoreLabel(value) {
-  const a = Math.abs(value ?? 0);
+  const a =
+    Math.abs(value ?? 0);
 
   if (a < 0.25) {
     return "균형에 가까운 포지션입니다.";
@@ -254,48 +358,87 @@ function scoreLabel(value) {
     : "흑 쪽으로 크게 기울었습니다.";
 }
 
+
+/* =========================================================
+   UCI → SAN
+   ========================================================= */
+
 function uciToSan(fen, uci) {
   try {
-    const c = new Chess(fen);
+    const c =
+      new Chess(fen);
 
-    const move = c.move({
-      from: uci.slice(0, 2),
-      to: uci.slice(2, 4),
-      promotion: uci[4]
-    });
+    const move =
+      c.move({
+        from: uci.slice(0, 2),
+        to: uci.slice(2, 4),
+        promotion: uci[4]
+      });
 
-    return move ? move.san : uci;
+    return move
+      ? move.san
+      : uci;
   } catch {
     return uci;
   }
 }
 
-function cancelCurrentAnalysis() {
-  if (!currentAnalysis) return;
 
-  const old = currentAnalysis;
+/* =========================================================
+   CANCEL ENGINE
+   ========================================================= */
+
+function cancelCurrentAnalysis() {
+  if (!currentAnalysis) {
+    return;
+  }
+
+  const old =
+    currentAnalysis;
 
   currentAnalysis = null;
 
-  clearTimeout(old.timeout);
-
-  old.reject?.(
-    new Error("이전 분석이 취소되었습니다.")
+  clearTimeout(
+    old.timeout
   );
 
-  if (engineReady && engine) {
-    engine.postMessage("stop");
+  old.reject?.(
+    new Error(
+      "이전 분석이 취소되었습니다."
+    )
+  );
+
+  if (
+    engineReady &&
+    engine
+  ) {
+    engine.postMessage(
+      "stop"
+    );
   }
 }
 
-function analyzeFen(fen, depth = 10) {
-  if (analysisCache.has(fen)) {
+
+/* =========================================================
+   ANALYZE FEN
+   ========================================================= */
+
+function analyzeFen(
+  fen,
+  depth = 10
+) {
+  if (
+    analysisCache.has(fen)
+  ) {
     return Promise.resolve(
       analysisCache.get(fen)
     );
   }
 
-  if (!engineReady || !engine) {
+  if (
+    !engineReady ||
+    !engine
+  ) {
     return Promise.reject(
       new Error(
         "Stockfish가 아직 준비되지 않았습니다."
@@ -305,160 +448,193 @@ function analyzeFen(fen, depth = 10) {
 
   cancelCurrentAnalysis();
 
-  return new Promise((resolve, reject) => {
-    const token = ++analysisToken;
+  return new Promise(
+    (resolve, reject) => {
+      const token =
+        ++analysisToken;
 
-    const turn = fen.split(" ")[1];
+      const turn =
+        fen.split(" ")[1];
 
-    const result = {
-      fen,
-      turn,
-      lines: new Map(),
-      depth: 0
-    };
+      const result = {
+        fen,
+        turn,
+        lines: new Map(),
+        depth: 0
+      };
 
-    const timeout = setTimeout(() => {
-      if (
-        currentAnalysis?.token !== token
-      ) {
-        return;
-      }
-
-      currentAnalysis = null;
-
-      reject(
-        new Error(
-          "엔진 분석 시간이 초과되었습니다."
-        )
-      );
-    }, 30000);
-
-    currentAnalysis = {
-      token,
-      timeout,
-      reject,
-
-      onLine(line) {
-        if (
-          currentAnalysis?.token !== token
-        ) {
-          return;
-        }
-
-        if (
-          line.startsWith("info ") &&
-          line.includes(" pv ")
-        ) {
-          const tokens =
-            line.split(/\s+/);
-
-          const depthIndex =
-            tokens.indexOf("depth");
-
-          const multiPvIndex =
-            tokens.indexOf("multipv");
-
-          const pvIndex =
-            tokens.indexOf("pv");
-
-          const d =
-            depthIndex >= 0
-              ? Number(
-                  tokens[depthIndex + 1]
-                )
-              : 0;
-
-          const multiPv =
-            multiPvIndex >= 0
-              ? Number(
-                  tokens[multiPvIndex + 1]
-                )
-              : 1;
-
-          const score = whiteScore(
-            parseScore(tokens),
-            turn
-          );
-
-          const pv =
-            pvIndex >= 0
-              ? tokens.slice(
-                  pvIndex + 1
-                )
-              : [];
-
-          result.depth =
-            Math.max(
-              result.depth,
-              d
-            );
-
+      const timeout =
+        setTimeout(() => {
           if (
-            score !== null &&
-            pv.length
+            currentAnalysis?.token !==
+            token
           ) {
-            result.lines.set(
-              multiPv,
-              {
-                score,
-                pv
-              }
-            );
+            return;
           }
-
-          if (d > 0) {
-            renderProgress(
-              Math.min(
-                95,
-                (d / depth) * 100
-              ),
-              d
-            );
-          }
-        }
-
-        if (
-          line.startsWith("bestmove")
-        ) {
-          clearTimeout(timeout);
 
           currentAnalysis = null;
 
-          result.lines =
-            [...result.lines.entries()]
-              .sort(
-                (a, b) =>
-                  a[0] - b[0]
-              )
-              .map(
-                ([, value]) =>
-                  value
+          reject(
+            new Error(
+              "엔진 분석 시간이 초과되었습니다."
+            )
+          );
+        }, 30000);
+
+      currentAnalysis = {
+        token,
+        timeout,
+        reject,
+
+        onLine(line) {
+          if (
+            currentAnalysis?.token !==
+            token
+          ) {
+            return;
+          }
+
+          if (
+            line.startsWith("info ") &&
+            line.includes(" pv ")
+          ) {
+            const tokens =
+              line.split(/\s+/);
+
+            const depthIndex =
+              tokens.indexOf(
+                "depth"
               );
 
-          analysisCache.set(
-            fen,
-            result
-          );
+            const multiPvIndex =
+              tokens.indexOf(
+                "multipv"
+              );
 
-          resolve(result);
+            const pvIndex =
+              tokens.indexOf(
+                "pv"
+              );
+
+            const d =
+              depthIndex >= 0
+                ? Number(
+                    tokens[
+                      depthIndex + 1
+                    ]
+                  )
+                : 0;
+
+            const multiPv =
+              multiPvIndex >= 0
+                ? Number(
+                    tokens[
+                      multiPvIndex + 1
+                    ]
+                  )
+                : 1;
+
+            const score =
+              whiteScore(
+                parseScore(
+                  tokens
+                ),
+                turn
+              );
+
+            const pv =
+              pvIndex >= 0
+                ? tokens.slice(
+                    pvIndex + 1
+                  )
+                : [];
+
+            result.depth =
+              Math.max(
+                result.depth,
+                d
+              );
+
+            if (
+              score !== null &&
+              pv.length
+            ) {
+              result.lines.set(
+                multiPv,
+                {
+                  score,
+                  pv
+                }
+              );
+            }
+
+            if (d > 0) {
+              renderProgress(
+                Math.min(
+                  95,
+                  (d / depth) * 100
+                ),
+                d
+              );
+            }
+          }
+
+          if (
+            line.startsWith(
+              "bestmove"
+            )
+          ) {
+            clearTimeout(
+              timeout
+            );
+
+            currentAnalysis =
+              null;
+
+            result.lines =
+              [
+                ...result.lines.entries()
+              ]
+                .sort(
+                  (a, b) =>
+                    a[0] - b[0]
+                )
+                .map(
+                  ([, value]) =>
+                    value
+                );
+
+            analysisCache.set(
+              fen,
+              result
+            );
+
+            resolve(result);
+          }
         }
-      }
-    };
+      };
 
-    engine.postMessage(
-      "position fen " + fen
-    );
+      engine.postMessage(
+        "position fen " + fen
+      );
 
-    engine.postMessage(
-      `go depth ${depth}`
-    );
-  });
+      engine.postMessage(
+        `go depth ${depth}`
+      );
+    }
+  );
 }
+
+
+/* =========================================================
+   POSITION LIST
+   ========================================================= */
 
 function buildPositions(chess) {
   const list = [];
 
-  let c = new Chess();
+  let c =
+    new Chess();
 
   list.push({
     ply: 0,
@@ -468,28 +644,42 @@ function buildPositions(chess) {
   });
 
   chess
-    .history({ verbose: true })
-    .forEach((move, index) => {
-      const made = c.move(
-        move.san
-      );
+    .history({
+      verbose: true
+    })
+    .forEach(
+      (move, index) => {
+        const made =
+          c.move(
+            move.san
+          );
 
-      list.push({
-        ply: index + 1,
-        fen: c.fen(),
-        san: made.san,
-        uci:
-          `${made.from}${made.to}${made.promotion || ""}`
-      });
-    });
+        list.push({
+          ply: index + 1,
+          fen: c.fen(),
+          san: made.san,
+          uci:
+            `${made.from}${made.to}${
+              made.promotion || ""
+            }`
+        });
+      }
+    );
 
   return list;
 }
 
-function renderBoard(fen) {
-  const c = new Chess(fen);
 
-  const board = c.board();
+/* =========================================================
+   BOARD
+   ========================================================= */
+
+function renderBoard(fen) {
+  const c =
+    new Chess(fen);
+
+  const board =
+    c.board();
 
   const white = {
     p: "♙",
@@ -509,41 +699,64 @@ function renderBoard(fen) {
     k: "♚"
   };
 
-  els.board.innerHTML = "";
+  els.board.innerHTML =
+    "";
 
-  board.forEach((row, ri) => {
-    row.forEach((piece, ci) => {
-      const square =
-        document.createElement("div");
+  board.forEach(
+    (row, ri) => {
+      row.forEach(
+        (piece, ci) => {
+          const square =
+            document.createElement(
+              "div"
+            );
 
-      square.className =
-        `sq ${
-          (ri + ci) % 2 === 0
-            ? "light"
-            : "dark"
-        }`;
+          square.className =
+            `sq ${
+              (ri + ci) % 2 === 0
+                ? "light"
+                : "dark"
+            }`;
 
-      if (piece) {
-        square.textContent =
-          piece.color === "w"
-            ? white[piece.type]
-            : black[piece.type];
-      }
+          if (piece) {
+            square.textContent =
+              piece.color === "w"
+                ? white[
+                    piece.type
+                  ]
+                : black[
+                    piece.type
+                  ];
+          }
 
-      els.board.appendChild(square);
-    });
-  });
+          els.board.appendChild(
+            square
+          );
+        }
+      );
+    }
+  );
 }
 
+
+/* =========================================================
+   MOVE LIST
+   ========================================================= */
+
 function renderMoves() {
-  els.moveList.innerHTML = "";
+  els.moveList.innerHTML =
+    "";
 
   positions.forEach(
     (position, index) => {
-      if (index === 0) return;
+      if (index === 0) {
+        return;
+      }
 
       const button =
-        document.createElement("button");
+        document.createElement(
+          "button"
+        );
 
       button.className =
         `moveItem ${
@@ -554,11 +767,14 @@ function renderMoves() {
 
       button.textContent =
         `${Math.ceil(index / 2)}${
-          index % 2 ? "." : "…"
+          index % 2
+            ? "."
+            : "…"
         } ${position.san}`;
 
-      button.onclick = () =>
-        selectPly(index);
+      button.onclick =
+        () =>
+          selectPly(index);
 
       els.moveList.appendChild(
         button
@@ -569,7 +785,7 @@ function renderMoves() {
 
 
 /* =========================================================
-   인간 관점 분석
+   POSITION SNAPSHOT
    ========================================================= */
 
 const COLOR_NAMES = {
@@ -577,518 +793,59 @@ const COLOR_NAMES = {
   b: "흑"
 };
 
-const START_SQUARES = {
-  w: {
-    n: ["b1", "g1"],
-    b: ["c1", "f1"],
-    r: ["a1", "h1"],
-    q: ["d1"],
-    k: ["e1"]
-  },
-
-  b: {
-    n: ["b8", "g8"],
-    b: ["c8", "f8"],
-    r: ["a8", "h8"],
-    q: ["d8"],
-    k: ["e8"]
-  }
+const PIECE_VALUES = {
+  p: 1,
+  n: 3.2,
+  b: 3.3,
+  r: 5,
+  q: 9,
+  k: 0
 };
 
-function findPieces(board, color, type) {
+
+/* =========================================================
+   FIND PIECES
+   ========================================================= */
+
+function findPieces(
+  board,
+  color,
+  type
+) {
   const result = [];
 
-  board.forEach((row, ri) => {
-    row.forEach((piece, ci) => {
-      if (
-        piece &&
-        piece.color === color &&
-        piece.type === type
-      ) {
-        const file =
-          String.fromCharCode(
-            97 + ci
-          );
+  board.forEach(
+    (row, ri) => {
+      row.forEach(
+        (piece, ci) => {
+          if (
+            piece &&
+            piece.color === color &&
+            piece.type === type
+          ) {
+            const file =
+              String.fromCharCode(
+                97 + ci
+              );
 
-        const rank = 8 - ri;
+            const rank =
+              8 - ri;
 
-        result.push({
-          piece,
-          square:
-            `${file}${rank}`
-        });
-      }
-    });
-  });
+            result.push({
+              piece,
+              square:
+                `${file}${rank}`
+            });
+          }
+        }
+      );
+    }
+  );
 
   return result;
 }
 
-function isStartingSquare(
-  color,
-  type,
-  square
-) {
-  return (
-    START_SQUARES[color]?.[type]
-      ?.includes(square) ?? false
-  );
-}
-
-function getLegalMobility(
-  chess,
-  square
-) {
-  try {
-    return chess.moves({
-      square,
-      verbose: true
-    }).length;
-  } catch {
-    return 0;
-  }
-}
-
-function getPieceAt(
-  board,
-  square
-) {
-  if (!square) return null;
-
-  const file =
-    square.charCodeAt(0) - 97;
-
-  const rank =
-    8 - Number(square[1]);
-
-  if (
-    rank < 0 ||
-    rank >= 8 ||
-    file < 0 ||
-    file >= 8
-  ) {
-    return null;
-  }
-
-  return board[rank]?.[file] || null;
-}
-
-function getFirstBlockingPiece(
-  board,
-  square,
-  dr,
-  dc
-) {
-  const file =
-    square.charCodeAt(0) - 97;
-
-  const rank =
-    Number(square[1]) - 1;
-
-  let r = 8 - rank;
-  let c = file;
-
-  r += dr;
-  c += dc;
-
-  while (
-    r >= 0 &&
-    r < 8 &&
-    c >= 0 &&
-    c < 8
-  ) {
-    const piece = board[r][c];
-
-    if (piece) {
-      return piece;
-    }
-
-    r += dr;
-    c += dc;
-  }
-
-  return null;
-}
-
-
-/* ---------------------------------------------------------
-   비숍의 실제 전개 가능성
-   --------------------------------------------------------- */
-
-function getBishopDiagonalStatus(
-  board,
-  square,
-  color
-) {
-  const directions = [
-    [-1, -1],
-    [-1, 1],
-    [1, -1],
-    [1, 1]
-  ];
-
-  let openDirections = 0;
-  let ownPawnBlocks = 0;
-  let ownPieceBlocks = 0;
-
-  for (const [dr, dc] of directions) {
-    const blocker =
-      getFirstBlockingPiece(
-        board,
-        square,
-        dr,
-        dc
-      );
-
-    if (!blocker) {
-      openDirections++;
-      continue;
-    }
-
-    if (
-      blocker.color === color &&
-      blocker.type === "p"
-    ) {
-      ownPawnBlocks++;
-    } else if (
-      blocker.color === color
-    ) {
-      ownPieceBlocks++;
-    }
-  }
-
-  return {
-    openDirections,
-    ownPawnBlocks,
-    ownPieceBlocks
-  };
-}
-
-function getBishopPlans(
-  chess,
-  bishop
-) {
-  const board = chess.board();
-  const color = bishop.piece.color;
-
-  const status =
-    getBishopDiagonalStatus(
-      board,
-      bishop.square,
-      color
-    );
-
-  const plans = [];
-
-  /*
-   * 실제로 d7 또는 d2를 통해 전개할 수 있는
-   * 비숍인지 확인한다.
-   */
-  const bishopMoveSquares =
-    chess.moves({
-      square: bishop.square,
-      verbose: true
-    })
-      .map(move => move.to);
-
-  const naturalDevelopment =
-    color === "w"
-      ? ["d2", "e3", "f4", "g5", "h6"]
-      : ["d7", "e6", "f5", "g4", "h3"];
-
-  const canUseCentralDiagonal =
-    naturalDevelopment.some(
-      square =>
-        bishopMoveSquares.includes(
-          square
-        )
-    );
-
-  /*
-   * 피앙케토 가능성:
-   * c8 비숍 -> b7
-   * f8 비숍 -> g7
-   * c1 비숍 -> b2
-   * f1 비숍 -> g2
-   */
-  let fianchettoPlan = null;
-
-  if (
-    color === "b" &&
-    bishop.square === "c8"
-  ) {
-    const b7 = getPieceAt(
-      board,
-      "b7"
-    );
-
-    if (
-      b7 &&
-      b7.color === color &&
-      b7.type === "p"
-    ) {
-      fianchettoPlan =
-        "...b6 → ...Bb7";
-    }
-  }
-
-  if (
-    color === "b" &&
-    bishop.square === "f8"
-  ) {
-    const g7 = getPieceAt(
-      board,
-      "g7"
-    );
-
-    if (
-      g7 &&
-      g7.color === color &&
-      g7.type === "p"
-    ) {
-      fianchettoPlan =
-        "...g6 → ...Bg7";
-    }
-  }
-
-  if (
-    color === "w" &&
-    bishop.square === "c1"
-  ) {
-    const b2 = getPieceAt(
-      board,
-      "b2"
-    );
-
-    if (
-      b2 &&
-      b2.color === color &&
-      b2.type === "p"
-    ) {
-      fianchettoPlan =
-        "b3 → Bb2";
-    }
-  }
-
-  if (
-    color === "w" &&
-    bishop.square === "f1"
-  ) {
-    const g2 = getPieceAt(
-      board,
-      "g2"
-    );
-
-    if (
-      g2 &&
-      g2.color === color &&
-      g2.type === "p"
-    ) {
-      fianchettoPlan =
-        "g3 → Bg2";
-    }
-  }
-
-  return {
-    ...status,
-    canUseCentralDiagonal,
-    fianchettoPlan
-  };
-}
-
-
-/* ---------------------------------------------------------
-   기물 활동성
-   --------------------------------------------------------- */
-
-function describePieceActivity(
-  chess,
-  phase
-) {
-  const board = chess.board();
-  const color = chess.turn();
-  const colorName =
-    COLOR_NAMES[color];
-
-  const knights =
-    findPieces(
-      board,
-      color,
-      "n"
-    );
-
-  const bishops =
-    findPieces(
-      board,
-      color,
-      "b"
-    );
-
-  const rooks =
-    findPieces(
-      board,
-      color,
-      "r"
-    );
-
-  /*
-   * 오프닝 초반에는 아직 전개되지 않은 기물이
-   * 자연스러운 상태일 수 있다.
-   */
-  if (
-    phase === "opening" &&
-    chess.history().length <= 4
-  ) {
-    return `${colorName}의 기물은 아직 오프닝 전개 단계에 있습니다. 지금은 특정 기물이 나쁘다고 보기보다 나이트와 비숍을 자연스럽게 전개하고 중앙에서 활동할 수 있는 자리를 확보하는 것이 중요합니다.`;
-  }
-
-  /*
-   * 나이트가 출발 위치에 있고
-   * 실제로 전개할 수 있는 경우
-   */
-  for (const item of knights) {
-    if (
-      isStartingSquare(
-        color,
-        "n",
-        item.square
-      )
-    ) {
-      const mobility =
-        getLegalMobility(
-          chess,
-          item.square
-        );
-
-      if (mobility >= 2) {
-        return `${colorName}의 ${item.square} 나이트는 아직 출발 위치에 있지만 전개할 수 있는 칸이 충분합니다. 오프닝에서는 이 나이트를 자연스럽게 전개해 중앙 통제와 다른 기물의 활동을 돕는 것을 고려할 수 있습니다.`;
-      }
-    }
-  }
-
-  /*
-   * 비숍은 "한쪽이 막혔다"만으로
-   * 활동성이 낮다고 판단하지 않는다.
-   */
-  for (const bishop of bishops) {
-    const plan =
-      getBishopPlans(
-        chess,
-        bishop
-      );
-
-    const mobility =
-      getLegalMobility(
-        chess,
-        bishop.square
-      );
-
-    /*
-     * c8 비숍의 경우
-     * d7 방향이 살아 있다면
-     * b7 쪽 폰 때문에 막혔다는 이유만으로
-     * 나쁜 기물이라고 판단하지 않는다.
-     */
-    if (
-      bishop.square ===
-        (color === "b"
-          ? "c8"
-          : "c1")
-    ) {
-      if (
-        plan.canUseCentralDiagonal &&
-        mobility > 0
-      ) {
-        if (
-          plan.fianchettoPlan
-        ) {
-          return `${colorName}의 ${bishop.square} 비숍은 한쪽 대각선이 폰에 의해 제한되어 있지만 다른 대각선은 열려 있어 현재 활동성이 크게 나쁘지 않습니다. 일반적인 전개와 함께 ${plan.fianchettoPlan}처럼 피앙케토를 선택하는 계획도 가능합니다.`;
-        }
-
-        return `${colorName}의 ${bishop.square} 비숍은 한쪽 대각선이 자신의 폰에 의해 제한되어 있지만 다른 대각선은 열려 있어 전개할 수 있습니다. 따라서 현재 이 비숍을 단순히 갇힌 기물로 볼 필요는 없습니다.`;
-      }
-    }
-
-    /*
-     * f8 / f1 비숍도 같은 방식으로 처리
-     */
-    if (
-      bishop.square ===
-        (color === "b"
-          ? "f8"
-          : "f1")
-    ) {
-      if (
-        mobility > 0
-      ) {
-        if (
-          plan.fianchettoPlan
-        ) {
-          return `${colorName}의 ${bishop.square} 비숍은 현재 전개할 수 있는 대각선이 있습니다. 중앙으로 전개할 수도 있고 ${plan.fianchettoPlan}처럼 긴 대각선을 확보하는 계획도 가능합니다.`;
-        }
-
-        return `${colorName}의 ${bishop.square} 비숍은 현재 전개할 수 있는 대각선이 있어 활동성이 크게 제한된 상태는 아닙니다. 다음 계획에 따라 중앙이나 긴 대각선으로 배치할 수 있습니다.`;
-      }
-    }
-
-    /*
-     * 정말 움직일 수 없는 비숍만
-     * 활동성 문제로 지적
-     */
-    if (
-      mobility <= 1 &&
-      plan.ownPawnBlocks >= 2
-    ) {
-      return `${colorName}의 ${bishop.square} 비숍은 자신의 폰에 여러 방향이 막혀 있어 실제 활동 범위가 제한되어 있습니다. 이 비숍이 사용할 대각선을 열어주는 것이 중요한 장기 계획이 될 수 있습니다.`;
-    }
-  }
-
-  /*
-   * 룩이 자기 폰 뒤에 있지만
-   * 오프닝에서는 정상적인 경우가 많다.
-   */
-  if (phase !== "opening") {
-    for (const rook of rooks) {
-      const mobility =
-        getLegalMobility(
-          chess,
-          rook.square
-        );
-
-      if (
-        mobility <= 1
-      ) {
-        return `${colorName}의 ${rook.square} 룩은 현재 활동할 수 있는 공간이 많지 않습니다. 열린 파일이나 반열린 파일을 확보해 룩을 더 활동적인 위치로 옮길 계획을 생각해볼 수 있습니다.`;
-      }
-    }
-  }
-
-  /*
-   * 정말 활동성이 낮은 나이트
-   */
-  for (const knight of knights) {
-    const mobility =
-      getLegalMobility(
-        chess,
-        knight.square
-      );
-
-    if (
-      mobility <= 1
-    ) {
-      return `${colorName}의 ${knight.square} 나이트는 현재 이동할 수 있는 칸이 거의 없어 활동성이 낮습니다. 더 좋은 전초기지나 중앙의 활동적인 칸을 확보할 수 있는지 살펴보는 것이 좋습니다.`;
-    }
-  }
-
-  return `${colorName}의 주요 기물들은 현재 비교적 활동할 수 있는 위치에 있습니다. 다음 수에서는 단순히 기물을 움직이기보다 상대보다 더 좋은 활동 범위를 확보하는 수를 찾아보는 것이 좋습니다.`;
-}
-
-
-/* =========================================================
-   게임 단계 판단
-   ========================================================= */
-
-function countPiecesByType(
+function countPieces(
   chess,
   color,
   type
@@ -1100,53 +857,56 @@ function countPiecesByType(
   ).length;
 }
 
+
+/* =========================================================
+   GAME PHASE
+   ========================================================= */
+
 function getGamePhase(chess) {
   const moveCount =
     chess.history().length;
 
   const queens =
-    countPiecesByType(
+    countPieces(
       chess,
       "w",
       "q"
     ) +
-    countPiecesByType(
+    countPieces(
       chess,
       "b",
       "q"
     );
 
   const rooks =
-    countPiecesByType(
+    countPieces(
       chess,
       "w",
       "r"
     ) +
-    countPiecesByType(
+    countPieces(
       chess,
       "b",
       "r"
     );
 
-  const bishops =
-    countPiecesByType(
+  const minorPieces =
+    countPieces(
       chess,
       "w",
       "b"
     ) +
-    countPiecesByType(
+    countPieces(
       chess,
       "b",
       "b"
-    );
-
-  const knights =
-    countPiecesByType(
+    ) +
+    countPieces(
       chess,
       "w",
       "n"
     ) +
-    countPiecesByType(
+    countPieces(
       chess,
       "b",
       "n"
@@ -1159,529 +919,342 @@ function getGamePhase(chess) {
     moveCount <= 12 &&
     queens >= 2 &&
     rooks >= 4 &&
-    bishops + knights >= 6
+    minorPieces >= 6
   ) {
     return "opening";
   }
 
   /*
-   * 엔드게임:
-   * 퀸이 사라졌거나 기물이 상당히 줄어든 경우
+   * 엔드게임
    */
   if (
     queens === 0 ||
     (
       rooks <= 2 &&
-      bishops + knights <= 2
+      minorPieces <= 2
     )
   ) {
     return "endgame";
   }
 
   /*
-   * 그 외는 미들게임
+   * 그 외
    */
   return "middlegame";
 }
 
-
-/* =========================================================
-   킹 안전
-   ========================================================= */
-
-function getKingInfo(
-  chess,
-  color
+function getPhaseName(
+  phase
 ) {
-  const kings =
-    findPieces(
-      chess.board(),
-      color,
-      "k"
-    );
+  if (
+    phase === "opening"
+  ) {
+    return "오프닝";
+  }
 
-  return kings.length
-    ? kings[0]
-    : null;
+  if (
+    phase === "endgame"
+  ) {
+    return "엔드게임";
+  }
+
+  return "미들게임";
 }
 
-function getKingZoneSquares(
-  square
-) {
-  if (!square) return [];
 
-  const file =
-    square.charCodeAt(0) - 97;
+/* =========================================================
+   MATERIAL
+   ========================================================= */
 
-  const rank =
-    Number(square[1]) - 1;
+function analyzeMaterial(chess) {
+  const result = {
+    white: {
+      pieces: {},
+      total: 0
+    },
 
-  const result = [];
+    black: {
+      pieces: {},
+      total: 0
+    },
+
+    difference: 0,
+
+    type: "equal",
+
+    relevance: "low"
+  };
 
   for (
-    let dr = -1;
-    dr <= 1;
-    dr++
+    const color of [
+      "w",
+      "b"
+    ]
   ) {
+    const side =
+      color === "w"
+        ? result.white
+        : result.black;
+
     for (
-      let dc = -1;
-      dc <= 1;
-      dc++
+      const type of [
+        "p",
+        "n",
+        "b",
+        "r",
+        "q"
+      ]
     ) {
-      if (
-        dr === 0 &&
-        dc === 0
-      ) {
-        continue;
-      }
-
-      const r =
-        rank + dr;
-
-      const c =
-        file + dc;
-
-      if (
-        r >= 0 &&
-        r < 8 &&
-        c >= 0 &&
-        c < 8
-      ) {
-        result.push(
-          `${String.fromCharCode(
-            97 + c
-          )}${r + 1}`
+      const count =
+        countPieces(
+          chess,
+          color,
+          type
         );
-      }
+
+      side.pieces[type] =
+        count;
+
+      side.total +=
+        count *
+        PIECE_VALUES[type];
     }
   }
+
+  result.difference =
+    Number(
+      (
+        result.white.total -
+        result.black.total
+      ).toFixed(1)
+    );
+
+  const d =
+    result.difference;
+
+  if (
+    Math.abs(d) < 0.3
+  ) {
+    result.type =
+      "equal";
+  } else if (
+    Math.abs(d) < 1.5
+  ) {
+    result.type =
+      "pawn_advantage";
+  } else if (
+    Math.abs(d) < 3.5
+  ) {
+    result.type =
+      "minor_piece_advantage";
+  } else if (
+    Math.abs(d) < 5.5
+  ) {
+    result.type =
+      "exchange_or_multiple_pawns";
+  } else {
+    result.type =
+      "major_material_advantage";
+  }
+
+  result.relevance =
+    Math.abs(d) >= 1.5
+      ? "medium"
+      : "low";
 
   return result;
 }
 
-function countKingDefenders(
-  chess,
-  color,
-  kingSquare
+
+/* =========================================================
+   POSITION SNAPSHOT
+   ========================================================= */
+
+function createPositionSnapshot(
+  chess
 ) {
-  const board = chess.board();
+  const phase =
+    getGamePhase(chess);
 
-  let count = 0;
+  return {
+    fen:
+      chess.fen(),
 
-  const zone =
-    getKingZoneSquares(
-      kingSquare
-    );
+    turn:
+      chess.turn(),
 
-  for (const square of zone) {
-    const piece =
-      (() => {
-        const file =
-          square.charCodeAt(0) -
-          97;
+    moveNumber:
+      chess.moveNumber(),
 
-        const rank =
-          8 -
-          Number(square[1]);
+    phase,
 
-        return board[rank]?.[file];
-      })();
+    /*
+     * 현재 실제 분석 모듈
+     */
+    material:
+      analyzeMaterial(chess),
 
-    if (
-      piece &&
-      piece.color === color
-    ) {
-      count++;
-    }
-  }
+    /*
+     * 앞으로 추가될 전략 모듈
+     */
+    minorPieces:
+      null,
 
-  return count;
-}
+    pawnStructure:
+      null,
 
-function countKingPawnShield(
-  chess,
-  color,
-  kingSquare
-) {
-  const board = chess.board();
+    weakSquares:
+      null,
 
-  if (!kingSquare) return 0;
+    space:
+      null,
 
-  const file =
-    kingSquare.charCodeAt(0) -
-    97;
+    center:
+      null,
 
-  const rank =
-    Number(kingSquare[1]);
+    openFiles:
+      null,
 
-  /*
-   * 킹이 어느 쪽에 있는지를 보고
-   * 실제 앞쪽의 폰을 확인한다.
-   */
-  const targetRank =
-    color === "w"
-      ? rank + 1
-      : rank - 1;
+    development:
+      null,
 
-  let count = 0;
+    initiative:
+      null,
 
-  for (
-    let dc = -1;
-    dc <= 1;
-    dc++
-  ) {
-    const c =
-      file + dc;
+    king:
+      null,
 
-    const boardRow =
-      8 - targetRank;
+    /*
+     * 상위 사고 단계
+     */
+    dominantImbalance:
+      null,
 
-    if (
-      boardRow < 0 ||
-      boardRow >= 8 ||
-      c < 0 ||
-      c >= 8
-    ) {
-      continue;
-    }
+    sideOfBoard:
+      null,
 
-    const piece =
-      board[boardRow][c];
+    counterplay:
+      null,
 
-    if (
-      piece &&
-      piece.color === color &&
-      piece.type === "p"
-    ) {
-      count++;
-    }
-  }
+    preventivePlan:
+      null,
 
-  return count;
-}
+    fantasyPosition:
+      null,
 
-function hasCastled(
-  chess,
-  color
-) {
-  const king =
-    getKingInfo(
-      chess,
-      color
-    );
-
-  if (!king) return false;
-
-  return (
-    (
-      color === "w" &&
-      (
-        king.square === "g1" ||
-        king.square === "c1"
-      )
-    ) ||
-    (
-      color === "b" &&
-      (
-        king.square === "g8" ||
-        king.square === "c8"
-      )
-    )
-  );
-}
-
-function countEnemyAttackersNearKing(
-  chess,
-  color,
-  kingSquare
-) {
-  if (!kingSquare) return 0;
-
-  const enemy =
-    color === "w"
-      ? "b"
-      : "w";
-
-  const zone =
-    getKingZoneSquares(
-      kingSquare
-    );
-
-  let count = 0;
-
-  for (const square of zone) {
-    try {
-      const attackers =
-        chess.attackers(
-          square,
-          enemy
-        );
-
-      count += attackers.length;
-    } catch {
-      /* 무시 */
-    }
-  }
-
-  return count;
-}
-
-function describeKingSafety(
-  chess,
-  phase
-) {
-  const side =
-    chess.turn();
-
-  const sideName =
-    COLOR_NAMES[side];
-
-  const king =
-    getKingInfo(
-      chess,
-      side
-    );
-
-  if (!king) {
-    return `${sideName} 킹의 위치를 확인할 수 없습니다.`;
-  }
-
-  /*
-   * 시작 포지션 및 초반:
-   * 킹 안전을 과도하게 문제 삼지 않는다.
-   */
-  if (
-    phase === "opening" &&
-    chess.history().length <= 4
-  ) {
-    return `${sideName} 킹은 아직 오프닝 초기 단계에 있습니다. 현재는 킹을 위험하다고 볼 만한 특별한 징후가 없으므로 빠른 기물 전개와 중앙 장악을 우선하는 것이 자연스럽습니다.`;
-  }
-
-  /*
-   * 체크
-   */
-  if (chess.isCheck()) {
-    return `${sideName} 킹은 현재 체크를 받고 있습니다. 지금은 다른 계획보다 먼저 체크를 해결하고 킹의 안전을 확보하는 것이 최우선입니다.`;
-  }
-
-  /*
-   * 엔드게임에서는 킹 안전의 의미 자체가 달라진다.
-   */
-  if (phase === "endgame") {
-    return `${sideName} 킹은 현재 직접적인 공격을 받고 있지 않습니다. 엔드게임에서는 킹을 뒤에 숨겨두는 것보다 중앙으로 적극적으로 가져와 폰과 주요 칸을 통제하는 것이 더 중요할 수 있습니다.`;
-  }
-
-  const pawnShield =
-    countKingPawnShield(
-      chess,
-      side,
-      king.square
-    );
-
-  const defenders =
-    countKingDefenders(
-      chess,
-      side,
-      king.square
-    );
-
-  const attackers =
-    countEnemyAttackersNearKing(
-      chess,
-      side,
-      king.square
-    );
-
-  const castled =
-    hasCastled(
-      chess,
-      side
-    );
-
-  /*
-   * 캐슬링 완료 + 충분한 폰 방패
-   */
-  if (
-    castled &&
-    pawnShield >= 2 &&
-    attackers === 0
-  ) {
-    return `${sideName} 킹은 현재 비교적 안전한 편입니다. 이미 캐슬링했고 킹 앞의 폰 구조도 유지되고 있으며 당장 킹 주변으로 들어오는 공격도 보이지 않습니다. 지금은 킹 안전보다 중앙과 기물 활동에 집중하는 것이 좋습니다.`;
-  }
-
-  /*
-   * 캐슬링했지만 공격 가능성이 있는 경우
-   */
-  if (
-    castled &&
-    attackers >= 2
-  ) {
-    return `${sideName} 킹은 캐슬링으로 기본적인 안전은 확보했지만 상대 기물들이 킹 주변의 칸을 바라보고 있습니다. 당장 위협이라고 단정할 수는 없지만 상대의 공격 기물이 더 모이기 전에 대응할 필요가 있습니다.`;
-  }
-
-  /*
-   * 캐슬링했고 폰 구조도 정상
-   */
-  if (
-    castled &&
-    pawnShield >= 2
-  ) {
-    return `${sideName} 킹은 현재 안정적인 편입니다. 캐슬링이 완료되어 있고 킹 앞의 폰 방패도 유지되고 있어 당장 킹 안전을 가장 먼저 해결해야 하는 상황은 아닙니다.`;
-  }
-
-  /*
-   * 아직 중앙에 있는 킹
-   */
-  const centralKing =
-    (
-      side === "w" &&
-      (
-        king.square === "e1" ||
-        king.square === "d1"
-      )
-    ) ||
-    (
-      side === "b" &&
-      (
-        king.square === "e8" ||
-        king.square === "d8"
-      )
-    );
-
-  if (
-    centralKing &&
-    attackers >= 1
-  ) {
-    return `${sideName} 킹이 아직 중앙에 있고 상대 기물의 공격 가능성이 보입니다. 중앙이 열리면 킹의 위험이 커질 수 있으므로 캐슬링이나 중앙을 안정시키는 계획을 우선적으로 고려하는 것이 좋습니다.`;
-  }
-
-  /*
-   * 폰 방패가 실제로 약한 경우.
-   * 단순히 1개라는 이유가 아니라
-   * 공격과 함께 판단한다.
-   */
-  if (
-    pawnShield <= 1 &&
-    attackers >= 1
-  ) {
-    return `${sideName} 킹 주변의 폰 방패가 약해진 상태에서 상대 기물의 접근도 보입니다. 아직 즉각적인 공격이라고 할 정도는 아니지만 킹 쪽을 보강하거나 상대의 공격 기물을 교환하는 것이 중요할 수 있습니다.`;
-  }
-
-  /*
-   * 그 외
-   */
-  return `${sideName} 킹은 현재 즉각적인 공격을 받고 있지 않아 비교적 안정적입니다. 킹 안전을 지나치게 걱정하기보다 현재 중앙과 기물의 활동성을 보고 다음 계획을 선택하는 것이 좋습니다.`;
+    candidates:
+      []
+  };
 }
 
 
 /* =========================================================
-   인간 관점 표시
+   HUMAN FACTORS
    ========================================================= */
 
-function renderFactors(fen) {
-  const c =
-    new Chess(fen);
+function materialText(
+  material
+) {
+  const d =
+    material.difference;
 
-  const board =
-    c.board();
+  if (
+    Math.abs(d) < 0.3
+  ) {
+    return "현재 기물 가치의 차이는 거의 없습니다.";
+  }
 
-  let material = 0;
+  if (d > 0) {
+    return `백이 약 ${Math.abs(d).toFixed(1)}점의 물질적 우세를 가지고 있습니다.`;
+  }
 
-  const values = {
-    p: 1,
-    n: 3.2,
-    b: 3.3,
-    r: 5,
-    q: 9,
-    k: 0
-  };
+  return `흑이 약 ${Math.abs(d).toFixed(1)}점의 물질적 우세를 가지고 있습니다.`;
+}
 
-  board.flat().forEach(
-    piece => {
-      if (piece) {
-        material +=
-          (
-            piece.color === "w"
-              ? 1
-              : -1
-          ) *
-          values[piece.type];
-      }
-    }
-  );
-
-  const side =
-    c.turn() === "w"
-      ? "백"
-      : "흑";
-
-  const phase =
-    getGamePhase(c);
-
+function buildInitialStrategyText(
+  snapshot
+) {
   const phaseName =
-    phase === "opening"
-      ? "오프닝"
-      : phase === "middlegame"
-        ? "미들게임"
-        : "엔드게임";
-
-  const activityText =
-    describePieceActivity(
-      c,
-      phase
+    getPhaseName(
+      snapshot.phase
     );
 
-  const kingSafetyText =
-    describeKingSafety(
-      c,
-      phase
+  /*
+   * 아직 모든 불균형을 분석하지 않았기 때문에
+   * 여기에서 성급하게 "가장 중요한 불균형"을 결정하지 않는다.
+   */
+  return `현재는 ${phaseName}으로 분류됩니다. 전략 분석은 기물의 개수부터 시작해 이후 활동성, 폰 구조, 공간, 킹 안전 등의 불균형을 차례대로 비교하게 됩니다.`;
+}
+
+function renderFactorsFromSnapshot(
+  snapshot
+) {
+  const phaseName =
+    getPhaseName(
+      snapshot.phase
     );
 
-  els.humanFactors.innerHTML = [
+  const items = [
     [
       "게임 단계",
       `현재 ${phaseName}입니다.`
     ],
 
     [
-      "물질",
-      Math.abs(material) < 0.3
-        ? "기물 가치가 거의 동일합니다."
-        : "기물 가치 차이가 있습니다."
+      "기물의 개수",
+      materialText(
+        snapshot.material
+      )
     ],
 
     [
-      "기물 활동",
-      activityText
+      "기물의 활동성",
+      "다음 단계에서 실제 기물의 이동 범위와 좋은 배치 가능성을 분석합니다."
     ],
 
     [
-      "킹 안전",
-      kingSafetyText
+      "폰 구조",
+      "다음 단계에서 고립폰, 더블폰, 후방폰, 통과폰, 폰 브레이크 등을 분석합니다."
     ],
 
     [
-      "계획",
-      phase === "opening"
-        ? `현재 ${side}의 차례입니다. 오프닝에서는 빠른 전개와 중앙 장악을 먼저 생각하고, 그 다음 구체적인 기물 배치를 결정하세요.`
-        : phase === "endgame"
-          ? `현재 ${side}의 차례입니다. 엔드게임에서는 킹의 활동 범위와 폰 구조, 통과폰을 중심으로 계획을 세우는 것이 중요합니다.`
-          : `현재 ${side}의 차례입니다. 내 기물의 활동성과 상대의 위협을 함께 확인한 뒤 다음 계획을 선택하세요.`
+      "공간",
+      "다음 단계에서 각 진영의 실제 활동 공간과 상대 기물에 대한 제한을 분석합니다."
+    ],
+
+    [
+      "킹의 안전",
+      "다음 단계에서 킹 주변의 공격 가능성과 게임 단계에 따른 킹의 역할을 분석합니다."
+    ],
+
+    [
+      "현재의 생각",
+      buildInitialStrategyText(
+        snapshot
+      )
     ]
-  ]
-    .map(
-      ([title, text]) =>
-        `<div class="factor"><b>${title}</b><span>${text}</span></div>`
-    )
-    .join("");
+  ];
+
+  els.humanFactors.innerHTML =
+    items
+      .map(
+        ([title, text]) =>
+          `<div class="factor">
+            <b>${title}</b>
+            <span>${text}</span>
+          </div>`
+      )
+      .join("");
 }
 
 
 /* =========================================================
-   엔진 결과
+   ENGINE RESULT
    ========================================================= */
 
-function renderAnalysis(result) {
+function renderAnalysis(
+  result
+) {
   const position =
     positions[currentPly];
 
@@ -1690,10 +1263,14 @@ function renderAnalysis(result) {
     null;
 
   els.evalValue.textContent =
-    formatScore(evaluation);
+    formatScore(
+      evaluation
+    );
 
   els.positionInsight.textContent =
-    scoreLabel(evaluation);
+    scoreLabel(
+      evaluation
+    );
 
   els.depthValue.textContent =
     result.depth || "—";
@@ -1704,16 +1281,21 @@ function renderAnalysis(result) {
   els.candidateList.innerHTML =
     "";
 
+  /*
+   * 지금은 엔진 후보를 그대로 보여준다.
+   * 이후 Candidate Engine에서
+   *
+   * Engine Best
+   * Strategic Alternative
+   * Practical Move
+   * Different Plan
+   *
+   * 으로 재분류한다.
+   */
   const labels = [
     "엔진 최선",
-    "전략적 후보",
-    "실전적 후보"
-  ];
-
-  const descriptions = [
-    "현재 포지션에서 엔진 평가를 가장 잘 유지하는 수입니다.",
-    "최선과 평가 차이가 작을 때 계획 선택지로 볼 수 있습니다.",
-    "평가를 크게 훼손하지 않으면서 실전에서 이해하기 쉬운 선택지입니다."
+    "전략 분석 대기",
+    "전략 분석 대기"
   ];
 
   result.lines
@@ -1726,6 +1308,11 @@ function renderAnalysis(result) {
             line.pv[0] || ""
           );
 
+        const description =
+          index === 0
+            ? "현재 단계에서는 엔진이 계산한 최선의 수를 표시합니다. 전략적 후보 분류는 이후 단계에서 추가합니다."
+            : "아직 전략 엔진의 후보 분류 단계가 구현되지 않았습니다.";
+
         els.candidateList.insertAdjacentHTML(
           "beforeend",
           `<div class="candidate">
@@ -1733,29 +1320,48 @@ function renderAnalysis(result) {
               <span class="candidateName">
                 ${index + 1}. ${san} · ${labels[index]}
               </span>
+
               <span class="candidateScore">
-                ${formatScore(line.score)}
+                ${formatScore(
+                  line.score
+                )}
               </span>
             </div>
+
             <div class="candidateDesc">
-              ${descriptions[index]}
+              ${description}
             </div>
           </div>`
         );
       }
     );
 
-  renderFactors(
-    position.fen
+  /*
+   * 현재 포지션의 Snapshot 생성
+   */
+  const chess =
+    new Chess(
+      position.fen
+    );
+
+  const snapshot =
+    createPositionSnapshot(
+      chess
+    );
+
+  renderFactorsFromSnapshot(
+    snapshot
   );
 }
 
 
 /* =========================================================
-   수 이동
+   SELECT PLY
    ========================================================= */
 
-async function selectPly(ply) {
+async function selectPly(
+  ply
+) {
   currentPly =
     Math.max(
       0,
@@ -1775,12 +1381,16 @@ async function selectPly(ply) {
   renderMoves();
 
   els.moveLabel.textContent =
-    `${currentPly} / ${positions.length - 1}`;
+    `${currentPly} / ${
+      positions.length - 1
+    }`;
 
   els.positionLabel.textContent =
     currentPly === 0
       ? "시작 포지션"
-      : `${Math.ceil(currentPly / 2)}${
+      : `${Math.ceil(
+          currentPly / 2
+        )}${
           currentPly % 2
             ? ". "
             : "… "
@@ -1802,7 +1412,10 @@ async function selectPly(ply) {
 
   clearError();
 
-  renderProgress(0, 0);
+  renderProgress(
+    0,
+    0
+  );
 
   els.evalValue.textContent =
     "분석 중…";
@@ -1810,8 +1423,19 @@ async function selectPly(ply) {
   els.candidateList.innerHTML =
     "";
 
-  renderFactors(
-    position.fen
+  /*
+   * 엔진 분석 전에
+   * Snapshot을 먼저 계산한다.
+   */
+  const snapshot =
+    createPositionSnapshot(
+      new Chess(
+        position.fen
+      )
+    );
+
+  renderFactorsFromSnapshot(
+    snapshot
   );
 
   try {
@@ -1842,6 +1466,11 @@ async function selectPly(ply) {
   }
 }
 
+
+/* =========================================================
+   START GAME
+   ========================================================= */
+
 async function startGame() {
   clearError();
 
@@ -1852,6 +1481,7 @@ async function startGame() {
     showError(
       "PGN을 입력해주세요."
     );
+
     return;
   }
 
@@ -1869,6 +1499,7 @@ async function startGame() {
     showError(
       "PGN을 읽을 수 없습니다. 수순 형식과 PGN 태그를 확인해주세요."
     );
+
     return;
   }
 
@@ -1877,7 +1508,8 @@ async function startGame() {
       chess
     );
 
-  currentPly = 0;
+  currentPly =
+    0;
 
   analysisCache.clear();
 
@@ -1899,15 +1531,16 @@ async function startGame() {
 
 
 /* =========================================================
-   버튼
+   BUTTONS
    ========================================================= */
 
-els.exampleBtn.onclick = () => {
-  els.pgnInput.value =
-    EXAMPLE;
+els.exampleBtn.onclick =
+  () => {
+    els.pgnInput.value =
+      EXAMPLE;
 
-  clearError();
-};
+    clearError();
+  };
 
 els.analyzeBtn.onclick =
   async () => {
@@ -1922,18 +1555,20 @@ els.analyzeBtn.onclick =
     }
   };
 
-els.backBtn.onclick = () => {
-  cancelCurrentAnalysis();
+els.backBtn.onclick =
+  () => {
+    cancelCurrentAnalysis();
 
-  els.analysisView.hidden =
-    true;
+    els.analysisView.hidden =
+      true;
 
-  els.inputView.hidden =
-    false;
-};
+    els.inputView.hidden =
+      false;
+  };
 
 els.firstBtn.onclick =
-  () => selectPly(0);
+  () =>
+    selectPly(0);
 
 els.prevBtn.onclick =
   () =>
@@ -1955,7 +1590,9 @@ els.lastBtn.onclick =
 
 
 /* =========================================================
-   시작
+   START
    ========================================================= */
 
-initEngine().catch(() => {});
+initEngine().catch(
+  () => {}
+);
