@@ -429,7 +429,7 @@ function bootEngine() {
 
 function analyzeFen(
   fen,
-  depth = 8
+  depth = 7
 ) {
   const key =
     `${fen}|${depth}`;
@@ -439,6 +439,416 @@ function analyzeFen(
       cache.get(key)
     );
   }
+
+  if (!engineReady || !worker) {
+    return Promise.reject(
+      new Error(
+        "Stockfish가 아직 준비되지 않았습니다."
+      )
+    );
+  }
+
+  if (activeJob) {
+    cancelEngineJob();
+  }
+
+  return new Promise(
+    (resolve, reject) => {
+
+      const turn =
+        fen.split(" ")[1];
+
+      const lines =
+        new Map();
+
+      let maxDepth = 0;
+
+      let finished = false;
+
+      const finishError = error => {
+        if (finished) {
+          return;
+        }
+
+        finished = true;
+
+        clearTimeout(timeout);
+
+        if (
+          activeJob === job
+        ) {
+          activeJob = null;
+        }
+
+        try {
+          worker.postMessage(
+            "stop"
+          );
+        } catch {}
+
+        reject(error);
+      };
+
+      const timeout =
+        setTimeout(() => {
+
+          finishError(
+            new Error(
+              "Stockfish 분석 시간이 초과되었습니다. 휴대폰에서 엔진 계산에 시간이 더 필요합니다."
+            )
+          );
+
+        }, 45000);
+
+
+      const job = {
+
+        timer:
+          timeout,
+
+        reject:
+          error => {
+            finishError(error);
+          },
+
+
+        handle(line) {
+
+          /*
+           * 엔진이 분석 정보를 보내는 동안
+           * 가장 깊은 결과를 저장한다.
+           */
+          if (
+            line.startsWith("info ") &&
+            line.includes(" pv ")
+          ) {
+
+            const tokens =
+              line.split(/\s+/);
+
+            const depthIndex =
+              tokens.indexOf(
+                "depth"
+              );
+
+            const multiPvIndex =
+              tokens.indexOf(
+                "multipv"
+              );
+
+            const pvIndex =
+              tokens.indexOf(
+                "pv"
+              );
+
+            const parsedScore =
+              parseScore(
+                tokens
+              );
+
+            const score =
+              whiteScore(
+                parsedScore,
+                turn
+              );
+
+            const currentDepth =
+              depthIndex >= 0
+                ? Number(
+                    tokens[
+                      depthIndex + 1
+                    ]
+                  )
+                : 0;
+
+            const multiPv =
+              multiPvIndex >= 0
+                ? Number(
+                    tokens[
+                      multiPvIndex + 1
+                    ]
+                  )
+                : 1;
+
+            const pv =
+              pvIndex >= 0
+                ? tokens.slice(
+                    pvIndex + 1
+                  )
+                : [];
+
+            if (
+              currentDepth >
+              maxDepth
+            ) {
+
+              maxDepth =
+                currentDepth;
+
+              setProgress(
+                Math.min(
+                  95,
+                  (
+                    currentDepth /
+                    depth
+                  ) * 100
+                ),
+                currentDepth
+              );
+            }
+
+            if (
+              currentDepth > 0 &&
+              score != null &&
+              pv.length > 0
+            ) {
+
+              const previous =
+                lines.get(
+                  multiPv
+                );
+
+              if (
+                !previous ||
+                currentDepth >=
+                  previous.depth
+              ) {
+
+                lines.set(
+                  multiPv,
+                  {
+                    score,
+                    pv,
+                    depth:
+                      currentDepth
+                  }
+                );
+
+              }
+
+            }
+
+            return;
+          }
+
+
+          /*
+           * 분석 종료
+           */
+          if (
+            line.startsWith(
+              "bestmove"
+            )
+          ) {
+
+            if (finished) {
+              return;
+            }
+
+            finished = true;
+
+            clearTimeout(
+              timeout
+            );
+
+            if (
+              activeJob !== job
+            ) {
+              return;
+            }
+
+            activeJob = null;
+
+            const result = {
+              fen,
+              turn,
+
+              depth:
+                maxDepth,
+
+              lines:
+                [...lines.entries()]
+                  .sort(
+                    (a, b) =>
+                      a[0] - b[0]
+                  )
+                  .map(
+                    ([, value]) =>
+                      value
+                  )
+            };
+
+
+            /*
+             * bestmove는 왔는데
+             * info가 하나도 없는 경우를
+             * 별도로 잡는다.
+             */
+            if (
+              result.lines.length === 0
+            ) {
+
+              reject(
+                new Error(
+                  "Stockfish가 bestmove는 반환했지만 평가 정보를 보내지 않았습니다."
+                )
+              );
+
+              return;
+            }
+
+
+            cache.set(
+              key,
+              result
+            );
+
+            setProgress(
+              100,
+              maxDepth
+            );
+
+            resolve(
+              result
+            );
+          }
+
+        }
+      };
+
+
+      activeJob =
+        job;
+
+
+      try {
+
+        /*
+         * 이전 분석 상태를 완전히 종료한다.
+         */
+        worker.postMessage(
+          "stop"
+        );
+
+        /*
+         * 새로운 게임/분석을 시작한다.
+         */
+        worker.postMessage(
+          "ucinewgame"
+        );
+
+        /*
+         * 엔진이 위 명령을 처리한 뒤
+         * 준비가 되었는지 확인한다.
+         */
+        worker.postMessage(
+          "isready"
+        );
+
+        /*
+         * position과 go는
+         * 위의 isready 응답 이후에
+         * 보내야 한다.
+         *
+         * 따라서 별도의 대기 작업을 만든다.
+         */
+        const waitReady = event => {
+
+          const line =
+            String(
+              event.data || ""
+            ).trim();
+
+          if (
+            line !== "readyok"
+          ) {
+            return;
+          }
+
+          worker.removeEventListener(
+            "message",
+            waitReady
+          );
+
+          if (
+            finished ||
+            activeJob !== job
+          ) {
+            return;
+          }
+
+          try {
+
+            /*
+             * 정확한 현재 포지션 전달
+             */
+            worker.postMessage(
+              `position fen ${fen}`
+            );
+
+            /*
+             * MultiPV 3
+             */
+            worker.postMessage(
+              "setoption name MultiPV value 3"
+            );
+
+            /*
+             * 다시 준비 확인
+             */
+            worker.postMessage(
+              "isready"
+            );
+
+            /*
+             * 실제 계산
+             *
+             * depth 7
+             * 휴대폰에서도 안정적으로
+             * 결과를 받을 수 있도록 한다.
+             */
+            setTimeout(() => {
+
+              if (
+                finished ||
+                activeJob !== job
+              ) {
+                return;
+              }
+
+              worker.postMessage(
+                `go depth ${depth}`
+              );
+
+            }, 50);
+
+          } catch (error) {
+
+            finishError(
+              error
+            );
+
+          }
+
+        };
+
+
+        worker.addEventListener(
+          "message",
+          waitReady
+        );
+
+      } catch (error) {
+
+        finishError(
+          error
+        );
+
+      }
+
+    }
+  );
+}
 
   if (!engineReady || !worker) {
     return Promise.reject(
