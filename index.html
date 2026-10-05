@@ -2,75 +2,285 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta
+    name="viewport"
+    content="width=device-width,initial-scale=1,viewport-fit=cover"
+  >
   <meta name="theme-color" content="#111318">
   <title>Human Chess Insight</title>
   <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
   <main class="app">
+
+    <!-- =====================================================
+         INPUT
+         ===================================================== -->
+
     <header class="topbar">
       <div>
         <h1>Human Chess Insight</h1>
         <p>엔진의 숫자를 사람이 이해할 수 있는 생각으로 바꿉니다.</p>
       </div>
-      <span id="engineStatus" class="status loading">엔진 준비 중…</span>
+
+      <span id="engineStatus" class="status loading">
+        엔진 준비 중…
+      </span>
     </header>
 
     <section id="inputView" class="card">
+
       <label for="pgnInput">PGN</label>
-      <textarea id="pgnInput" spellcheck="false" placeholder="PGN을 붙여넣으세요."></textarea>
+
+      <textarea
+        id="pgnInput"
+        spellcheck="false"
+        placeholder="PGN을 붙여넣으세요."
+      ></textarea>
+
       <div class="actions">
-        <button id="exampleBtn" class="secondary">예제 PGN</button>
-        <button id="analyzeBtn" class="primary">게임 분석 시작</button>
+        <button id="exampleBtn" class="secondary">
+          예제 PGN
+        </button>
+
+        <button id="analyzeBtn" class="primary">
+          게임 분석 시작
+        </button>
       </div>
+
       <p id="errorBox" class="error" hidden></p>
-      <p class="hint">분석은 서버가 아니라 이 기기의 브라우저에서 수행됩니다.</p>
+
+      <p class="hint">
+        분석은 서버가 아니라 이 기기의 브라우저에서 수행됩니다.
+      </p>
+
     </section>
+
+
+    <!-- =====================================================
+         ANALYSIS
+         ===================================================== -->
 
     <section id="analysisView" hidden>
-      <div class="layout">
-        <section class="card boardCard">
-          <div class="sectionTitle">
-            <div>
-              <strong id="positionLabel">시작 포지션</strong>
-              <span id="moveLabel">0 / 0</span>
+
+      <div class="analysis-layout">
+
+        <!-- =================================================
+             TOP : CHESS BOARD
+             ================================================= -->
+
+        <section class="board-section">
+
+          <div class="card boardCard">
+
+            <div class="sectionTitle">
+
+              <div>
+                <strong id="positionLabel">
+                  시작 포지션
+                </strong>
+
+                <span id="moveLabel">
+                  0 / 0
+                </span>
+              </div>
+
+              <button
+                id="backBtn"
+                class="secondary small"
+              >
+                새 PGN
+              </button>
+
             </div>
-            <button id="backBtn" class="secondary small">새 PGN</button>
+
+
+            <!-- CHESS BOARD -->
+
+            <div
+              id="board"
+              class="board"
+              aria-label="체스판"
+            ></div>
+
+
+            <!-- BOARD NAVIGATION -->
+
+            <div class="navButtons">
+
+              <button
+                id="firstBtn"
+                class="secondary"
+              >
+                처음
+              </button>
+
+              <button
+                id="prevBtn"
+                class="secondary"
+              >
+                ◀ 이전
+              </button>
+
+              <button
+                id="nextBtn"
+                class="secondary"
+              >
+                다음 ▶
+              </button>
+
+              <button
+                id="lastBtn"
+                class="secondary"
+              >
+                마지막
+              </button>
+
+            </div>
+
           </div>
-          <div id="board" class="board" aria-label="체스판"></div>
-          <div class="navButtons">
-            <button id="firstBtn" class="secondary">처음</button>
-            <button id="prevBtn" class="secondary">◀ 이전</button>
-            <button id="nextBtn" class="secondary">다음 ▶</button>
-            <button id="lastBtn" class="secondary">마지막</button>
-          </div>
+
         </section>
 
-        <section class="card movesCard">
-          <div class="sectionTitle"><strong>수순</strong><span id="gameMeta"></span></div>
-          <div id="moveList" class="moveList"></div>
-        </section>
 
-        <section class="card insightCard">
-          <div class="evalRow">
-            <div>
-              <span class="muted">현재 평가</span>
-              <strong id="evalValue">—</strong>
+        <!-- =================================================
+             BOTTOM : SCROLLABLE ANALYSIS
+             ================================================= -->
+
+        <div class="analysis-scroll">
+
+
+          <!-- ===============================================
+               MOVE LIST
+               =============================================== -->
+
+          <section class="card movesCard">
+
+            <div class="sectionTitle">
+
+              <strong>
+                수순
+              </strong>
+
+              <span id="gameMeta"></span>
+
             </div>
-            <div class="depthBox"><span class="muted">깊이</span><strong id="depthValue">—</strong></div>
-          </div>
-          <div class="progress"><div id="progressBar"></div></div>
-          <p id="positionInsight" class="insight">포지션을 분석하고 있습니다.</p>
-          <div class="sectionTitle candidateTitle"><strong>후보 수</strong><span>MultiPV 3</span></div>
-          <div id="candidateList" class="candidates"></div>
-          <div class="sectionTitle"><strong>사람의 관점</strong></div>
-          <div id="humanFactors" class="factors"></div>
-        </section>
+
+            <div
+              id="moveList"
+              class="moveList"
+            ></div>
+
+          </section>
+
+
+          <!-- ===============================================
+               ENGINE EVALUATION + HUMAN ANALYSIS
+               =============================================== -->
+
+          <section class="card insightCard">
+
+            <!-- CURRENT EVALUATION -->
+
+            <div class="evalRow">
+
+              <div>
+
+                <span class="muted">
+                  현재 평가
+                </span>
+
+                <strong id="evalValue">
+                  —
+                </strong>
+
+              </div>
+
+              <div class="depthBox">
+
+                <span class="muted">
+                  깊이
+                </span>
+
+                <strong id="depthValue">
+                  —
+                </strong>
+
+              </div>
+
+            </div>
+
+
+            <!-- ENGINE PROGRESS -->
+
+            <div class="progress">
+              <div id="progressBar"></div>
+            </div>
+
+
+            <!-- POSITION SUMMARY -->
+
+            <p
+              id="positionInsight"
+              class="insight"
+            >
+              포지션을 분석하고 있습니다.
+            </p>
+
+
+            <!-- CANDIDATE MOVES -->
+
+            <div class="sectionTitle candidateTitle">
+
+              <strong>
+                후보 수
+              </strong>
+
+              <span>
+                MultiPV 3
+              </span>
+
+            </div>
+
+            <div
+              id="candidateList"
+              class="candidates"
+            ></div>
+
+
+            <!-- HUMAN PERSPECTIVE -->
+
+            <div class="sectionTitle">
+
+              <strong>
+                사람의 관점
+              </strong>
+
+            </div>
+
+            <div
+              id="humanFactors"
+              class="factors"
+            ></div>
+
+          </section>
+
+
+        </div>
+
       </div>
+
     </section>
+
+
   </main>
 
-  <script type="module" src="app.js"></script>
+
+  <script
+    type="module"
+    src="app.js"
+  ></script>
+
 </body>
 </html>
