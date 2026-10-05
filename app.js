@@ -1,866 +1,28 @@
 import { Chess } from "https://cdn.jsdelivr.net/npm/chess.js@1.4.0/+esm";
 
-/*
- * Human Chess Insight
- * STEP 2 — Minor Pieces / Bishop
- *
- * 사고 구조
- *
- * POSITION
- * → GAME PHASE
- * → MATERIAL
- * → MINOR PIECES
- *    → BISHOP
- *       → Good Bishop
- *       → Bad Bishop
- *       → Active Bishop
- *       → Improvement Plan
- *
- * 이후 단계
- * → KNIGHT
- * → PAWN STRUCTURE
- * → WEAK SQUARES
- * → SPACE
- * → CENTER
- * → OPEN FILES
- * → DEVELOPMENT / INITIATIVE
- * → KING SAFETY
- * → DOMINANT IMBALANCE
- * → COUNTERPLAY
- * → FANTASY POSITION
- * → CANDIDATES
- * → STOCKFISH VALIDATION
- * → HUMAN EXPLANATION
- */
+const STOCKFISH_PATH = "./stockfish/stockfish-19-lite-single.js";
 
-
-/* =========================================================
-   BASIC
-   ========================================================= */
-
-const $ = id => document.getElementById(id);
-
-const els = {
-  inputView: $("inputView"),
-  analysisView: $("analysisView"),
-  pgnInput: $("pgnInput"),
-  analyzeBtn: $("analyzeBtn"),
-  exampleBtn: $("exampleBtn"),
-  backBtn: $("backBtn"),
-  errorBox: $("errorBox"),
-  engineStatus: $("engineStatus"),
-  board: $("board"),
-  moveList: $("moveList"),
-  moveLabel: $("moveLabel"),
-  positionLabel: $("positionLabel"),
-  gameMeta: $("gameMeta"),
-  evalValue: $("evalValue"),
-  depthValue: $("depthValue"),
-  progressBar: $("progressBar"),
-  positionInsight: $("positionInsight"),
-  candidateList: $("candidateList"),
-  humanFactors: $("humanFactors"),
-  firstBtn: $("firstBtn"),
-  prevBtn: $("prevBtn"),
-  nextBtn: $("nextBtn"),
-  lastBtn: $("lastBtn")
-};
-
-
-/* =========================================================
-   EXAMPLE
-   ========================================================= */
-
-const EXAMPLE = `[Event "Human Chess Insight Demo"]
-[Site "Local"]
-[Date "2026.01.01"]
-[Round "1"]
-[White "White"]
-[Black "Black"]
-[Result "*"]
-
-1. e4 e5
-2. Nf3 Nc6
-3. Bb5 a6
-4. Ba4 Nf6
-5. O-O Be7
-6. Re1 b5
-7. Bb3 d6
-8. c3 O-O
-9. h3 *`;
-
-
-/* =========================================================
-   STOCKFISH
-   ========================================================= */
-
-const ENGINE_PATH =
-  new URL(
-    "stockfish/stockfish-19-lite-single.js",
-    import.meta.url
-  ).toString();
-
-let engine = null;
-let engineReady = false;
-let engineInitPromise = null;
-
-let currentAnalysis = null;
-let analysisToken = 0;
-
-let positions = [];
-let currentPly = 0;
-
-let analysisCache = new Map();
-
-
-/* =========================================================
-   UI / ENGINE STATUS
-   ========================================================= */
-
-function setStatus(
-  text,
-  type = "loading"
-) {
-  els.engineStatus.textContent = text;
-  els.engineStatus.className =
-    `status ${type}`;
-}
-
-function showError(text) {
-  els.errorBox.textContent = text;
-  els.errorBox.hidden = false;
-}
-
-function clearError() {
-  els.errorBox.hidden = true;
-  els.errorBox.textContent = "";
-}
-
-function renderProgress(
-  percent,
-  depth = 0
-) {
-  els.progressBar.style.width =
-    `${Math.max(
-      0,
-      Math.min(100, percent)
-    )}%`;
-
-  els.depthValue.textContent =
-    depth
-      ? String(depth)
-      : "—";
-}
-
-
-/* =========================================================
-   STOCKFISH INITIALIZATION
-   ========================================================= */
-
-function initEngine() {
-  if (engineInitPromise) {
-    return engineInitPromise;
-  }
-
-  engineInitPromise =
-    new Promise(
-      (resolve, reject) => {
-        setStatus(
-          "Stockfish 로딩 중…",
-          "loading"
-        );
-
-        try {
-          engine =
-            new Worker(
-              ENGINE_PATH
-            );
-        } catch (e) {
-          reject(e);
-          return;
-        }
-
-        let phase = "boot";
-
-        const timer =
-          setTimeout(
-            () => {
-              reject(
-                new Error(
-                  "Stockfish 로딩 시간이 초과되었습니다."
-                )
-              );
-            },
-            30000
-          );
-
-        engine.onerror =
-          event => {
-            clearTimeout(timer);
-
-            reject(
-              new Error(
-                event?.message ||
-                "Stockfish Worker 오류"
-              )
-            );
-          };
-
-        engine.onmessage =
-          event => {
-            const line =
-              typeof event.data ===
-              "string"
-                ? event.data.trim()
-                : "";
-
-            if (!line) {
-              return;
-            }
-
-            if (
-              line === "uciok" &&
-              phase === "boot"
-            ) {
-              phase =
-                "waiting-ready";
-
-              engine.postMessage(
-                "setoption name MultiPV value 3"
-              );
-
-              engine.postMessage(
-                "isready"
-              );
-
-              return;
-            }
-
-            if (
-              line === "readyok" &&
-              phase ===
-                "waiting-ready"
-            ) {
-              clearTimeout(timer);
-
-              phase = "ready";
-              engineReady = true;
-
-              setStatus(
-                "Stockfish 준비 완료",
-                "ready"
-              );
-
-              resolve();
-              return;
-            }
-
-            if (currentAnalysis) {
-              currentAnalysis.onLine(
-                line
-              );
-            }
-          };
-
-        engine.postMessage(
-          "uci"
-        );
-      }
-    )
-      .catch(error => {
-        engineReady = false;
-
-        setStatus(
-          "엔진 오류",
-          "error"
-        );
-
-        throw error;
-      });
-
-  return engineInitPromise;
-}
-
-
-/* =========================================================
-   ENGINE SCORE
-   ========================================================= */
-
-function parseScore(tokens) {
-  const i =
-    tokens.indexOf("score");
-
-  if (i < 0) {
-    return null;
-  }
-
-  const kind =
-    tokens[i + 1];
-
-  const value =
-    Number(
-      tokens[i + 2]
-    );
-
-  if (
-    !kind ||
-    Number.isNaN(value)
-  ) {
-    return null;
-  }
-
-  if (kind === "cp") {
-    return {
-      type: "cp",
-      raw: value
-    };
-  }
-
-  if (kind === "mate") {
-    return {
-      type: "mate",
-      raw: value
-    };
-  }
-
-  return null;
-}
-
-function whiteScore(
-  score,
-  turn
-) {
-  if (!score) {
-    return null;
-  }
-
-  if (
-    score.type === "cp"
-  ) {
-    return (
-      (
-        turn === "w"
-          ? score.raw
-          : -score.raw
-      ) / 100
-    );
-  }
-
-  const sign =
-    score.raw > 0
-      ? 1
-      : -1;
-
-  return (
-    turn === "w"
-      ? sign * 100
-      : -sign * 100
-  );
-}
-
-function formatScore(value) {
-  if (
-    value === null ||
-    value === undefined ||
-    Number.isNaN(value)
-  ) {
-    return "—";
-  }
-
-  if (
-    Math.abs(value) >= 99
-  ) {
-    return value > 0
-      ? "+M"
-      : "−M";
-  }
-
-  return `${
-    value >= 0
-      ? "+"
-      : "−"
-  }${Math.abs(value).toFixed(1)}`;
-}
-
-function scoreLabel(value) {
-  const a =
-    Math.abs(value ?? 0);
-
-  if (a < 0.25) {
-    return "균형에 가까운 포지션입니다.";
-  }
-
-  if (a < 0.8) {
-    return value > 0
-      ? "백이 조금 더 편한 포지션입니다."
-      : "흑이 조금 더 편한 포지션입니다.";
-  }
-
-  if (a < 1.8) {
-    return value > 0
-      ? "백에게 뚜렷한 실전적 우세가 있습니다."
-      : "흑에게 뚜렷한 실전적 우세가 있습니다.";
-  }
-
-  if (a < 3.5) {
-    return value > 0
-      ? "백의 우세가 상당합니다."
-      : "흑의 우세가 상당합니다.";
-  }
-
-  return value > 0
-    ? "백 쪽으로 크게 기울었습니다."
-    : "흑 쪽으로 크게 기울었습니다.";
-}
-
-
-/* =========================================================
-   UCI → SAN
-   ========================================================= */
-
-function uciToSan(
-  fen,
-  uci
-) {
-  try {
-    const c =
-      new Chess(fen);
-
-    const move =
-      c.move({
-        from:
-          uci.slice(0, 2),
-        to:
-          uci.slice(2, 4),
-        promotion:
-          uci[4]
-      });
-
-    return move
-      ? move.san
-      : uci;
-  } catch {
-    return uci;
-  }
-}
-
-
-/* =========================================================
-   CANCEL ENGINE
-   ========================================================= */
-
-function cancelCurrentAnalysis() {
-  if (!currentAnalysis) {
-    return;
-  }
-
-  const old =
-    currentAnalysis;
-
-  currentAnalysis = null;
-
-  clearTimeout(
-    old.timeout
-  );
-
-  old.reject?.(
-    new Error(
-      "이전 분석이 취소되었습니다."
-    )
-  );
-
-  if (
-    engineReady &&
-    engine
-  ) {
-    engine.postMessage(
-      "stop"
-    );
-  }
-}
-
-
-/* =========================================================
-   ANALYZE FEN
-   ========================================================= */
-
-function analyzeFen(
-  fen,
-  depth = 10
-) {
-  if (
-    analysisCache.has(fen)
-  ) {
-    return Promise.resolve(
-      analysisCache.get(fen)
-    );
-  }
-
-  if (
-    !engineReady ||
-    !engine
-  ) {
-    return Promise.reject(
-      new Error(
-        "Stockfish가 아직 준비되지 않았습니다."
-      )
-    );
-  }
-
-  cancelCurrentAnalysis();
-
-  return new Promise(
-    (resolve, reject) => {
-      const token =
-        ++analysisToken;
-
-      const turn =
-        fen.split(" ")[1];
-
-      const result = {
-        fen,
-        turn,
-        lines: new Map(),
-        depth: 0
-      };
-
-      const timeout =
-        setTimeout(
-          () => {
-            if (
-              currentAnalysis?.token !==
-              token
-            ) {
-              return;
-            }
-
-            currentAnalysis =
-              null;
-
-            reject(
-              new Error(
-                "엔진 분석 시간이 초과되었습니다."
-              )
-            );
-          },
-          30000
-        );
-
-      currentAnalysis = {
-        token,
-        timeout,
-        reject,
-
-        onLine(line) {
-          if (
-            currentAnalysis?.token !==
-            token
-          ) {
-            return;
-          }
-
-          if (
-            line.startsWith("info ") &&
-            line.includes(" pv ")
-          ) {
-            const tokens =
-              line.split(/\s+/);
-
-            const depthIndex =
-              tokens.indexOf(
-                "depth"
-              );
-
-            const multiPvIndex =
-              tokens.indexOf(
-                "multipv"
-              );
-
-            const pvIndex =
-              tokens.indexOf(
-                "pv"
-              );
-
-            const d =
-              depthIndex >= 0
-                ? Number(
-                    tokens[
-                      depthIndex + 1
-                    ]
-                  )
-                : 0;
-
-            const multiPv =
-              multiPvIndex >= 0
-                ? Number(
-                    tokens[
-                      multiPvIndex + 1
-                    ]
-                  )
-                : 1;
-
-            const score =
-              whiteScore(
-                parseScore(
-                  tokens
-                ),
-                turn
-              );
-
-            const pv =
-              pvIndex >= 0
-                ? tokens.slice(
-                    pvIndex + 1
-                  )
-                : [];
-
-            result.depth =
-              Math.max(
-                result.depth,
-                d
-              );
-
-            if (
-              score !== null &&
-              pv.length
-            ) {
-              result.lines.set(
-                multiPv,
-                {
-                  score,
-                  pv
-                }
-              );
-            }
-
-            if (d > 0) {
-              renderProgress(
-                Math.min(
-                  95,
-                  (d / depth) * 100
-                ),
-                d
-              );
-            }
-          }
-
-          if (
-            line.startsWith(
-              "bestmove"
-            )
-          ) {
-            clearTimeout(
-              timeout
-            );
-
-            currentAnalysis =
-              null;
-
-            result.lines =
-              [
-                ...result.lines.entries()
-              ]
-                .sort(
-                  (a, b) =>
-                    a[0] - b[0]
-                )
-                .map(
-                  ([, value]) =>
-                    value
-                );
-
-            analysisCache.set(
-              fen,
-              result
-            );
-
-            resolve(result);
-          }
-        }
-      };
-
-      engine.postMessage(
-        "position fen " + fen
-      );
-
-      engine.postMessage(
-        `go depth ${depth}`
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   POSITION LIST
-   ========================================================= */
-
-function buildPositions(
-  chess
-) {
-  const list = [];
-
-  let c =
-    new Chess();
-
-  list.push({
-    ply: 0,
-    fen: c.fen(),
-    san: null,
-    uci: null
-  });
-
-  chess
-    .history({
-      verbose: true
-    })
-    .forEach(
-      (move, index) => {
-        const made =
-          c.move(
-            move.san
-          );
-
-        list.push({
-          ply: index + 1,
-          fen: c.fen(),
-          san: made.san,
-          uci:
-            `${made.from}${made.to}${
-              made.promotion || ""
-            }`
-        });
-      }
-    );
-
-  return list;
-}
-
-
-/* =========================================================
-   BOARD
-   ========================================================= */
-
-function renderBoard(
-  fen
-) {
-  const c =
-    new Chess(fen);
-
-  const board =
-    c.board();
-
-  const white = {
+const PIECES = {
+  w: {
     p: "♙",
     n: "♘",
     b: "♗",
     r: "♖",
     q: "♕",
     k: "♔"
-  };
-
-  const black = {
+  },
+  b: {
     p: "♟",
     n: "♞",
     b: "♝",
     r: "♜",
     q: "♛",
     k: "♚"
-  };
-
-  els.board.innerHTML =
-    "";
-
-  board.forEach(
-    (row, ri) => {
-      row.forEach(
-        (piece, ci) => {
-          const square =
-            document.createElement(
-              "div"
-            );
-
-          square.className =
-            `sq ${
-              (ri + ci) % 2 === 0
-                ? "light"
-                : "dark"
-            }`;
-
-          if (piece) {
-            square.textContent =
-              piece.color === "w"
-                ? white[
-                    piece.type
-                  ]
-                : black[
-                    piece.type
-                  ];
-          }
-
-          els.board.appendChild(
-            square
-          );
-        }
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   MOVE LIST
-   ========================================================= */
-
-function renderMoves() {
-  els.moveList.innerHTML =
-    "";
-
-  positions.forEach(
-    (position, index) => {
-      if (index === 0) {
-        return;
-      }
-
-      const button =
-        document.createElement(
-          "button"
-        );
-
-      button.className =
-        `moveItem ${
-          index === currentPly
-            ? "active"
-            : ""
-        }`;
-
-      button.textContent =
-        `${Math.ceil(index / 2)}${
-          index % 2
-            ? "."
-            : "…"
-        } ${position.san}`;
-
-      button.onclick =
-        () =>
-          selectPly(index);
-
-      els.moveList.appendChild(
-        button
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   PIECE / BOARD HELPERS
-   ========================================================= */
-
-const COLOR_NAMES = {
-  w: "백",
-  b: "흑"
+  }
 };
+
+const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
+const RANKS = ["8", "7", "6", "5", "4", "3", "2", "1"];
 
 const PIECE_VALUES = {
   p: 1,
@@ -871,198 +33,429 @@ const PIECE_VALUES = {
   k: 0
 };
 
-function findPieces(
-  board,
-  color,
-  type
-) {
-  const result = [];
+let engine = null;
+let engineReady = false;
+let engineBusy = false;
+let engineResolve = null;
+let engineLines = [];
+let currentDepth = 0;
 
-  board.forEach(
-    (row, ri) => {
-      row.forEach(
-        (piece, ci) => {
-          if (
-            piece &&
-            piece.color === color &&
-            piece.type === type
-          ) {
-            const file =
-              String.fromCharCode(
-                97 + ci
-              );
+let game = new Chess();
+let positions = [];
+let currentPly = 0;
+let totalPlies = 0;
+let currentSnapshot = null;
 
-            const rank =
-              8 - ri;
+const els = {
+  inputView: document.getElementById("inputView"),
+  analysisView: document.getElementById("analysisView"),
 
-            result.push({
-              piece,
-              square:
-                `${file}${rank}`,
-              row: ri,
-              col: ci
-            });
-          }
-        }
-      );
-    }
-  );
+  pgnInput: document.getElementById("pgnInput"),
+  exampleBtn: document.getElementById("exampleBtn"),
+  analyzeBtn: document.getElementById("analyzeBtn"),
+  errorBox: document.getElementById("errorBox"),
 
-  return result;
+  engineStatus: document.getElementById("engineStatus"),
+
+  board: document.getElementById("board"),
+  positionLabel: document.getElementById("positionLabel"),
+  moveLabel: document.getElementById("moveLabel"),
+  gameMeta: document.getElementById("gameMeta"),
+
+  moveList: document.getElementById("moveList"),
+
+  firstBtn: document.getElementById("firstBtn"),
+  prevBtn: document.getElementById("prevBtn"),
+  nextBtn: document.getElementById("nextBtn"),
+  lastBtn: document.getElementById("lastBtn"),
+  backBtn: document.getElementById("backBtn"),
+
+  evalValue: document.getElementById("evalValue"),
+  depthValue: document.getElementById("depthValue"),
+  progressBar: document.getElementById("progressBar"),
+  positionInsight: document.getElementById("positionInsight"),
+  candidateList: document.getElementById("candidateList"),
+  humanFactors: document.getElementById("humanFactors")
+};
+
+
+/* =========================================================
+   기본 유틸
+========================================================= */
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
-function countPieces(
-  chess,
-  color,
-  type
-) {
-  return findPieces(
-    chess.board(),
-    color,
-    type
-  ).length;
+function oppositeColor(color) {
+  return color === "w" ? "b" : "w";
 }
 
-function squareToCoords(
-  square
-) {
-  return {
-    col:
-      square.charCodeAt(0) - 97,
+function colorName(color) {
+  return color === "w" ? "백" : "흑";
+}
 
-    row:
-      8 - Number(
-        square[1]
-      )
+function pieceName(type) {
+  const names = {
+    p: "폰",
+    n: "나이트",
+    b: "비숍",
+    r: "룩",
+    q: "퀸",
+    k: "킹"
   };
+
+  return names[type] || type;
 }
 
-function coordsToSquare(
-  row,
-  col
-) {
-  if (
-    row < 0 ||
-    row > 7 ||
-    col < 0 ||
-    col > 7
-  ) {
-    return null;
+function squareColor(square) {
+  const file = FILES.indexOf(square[0]);
+  const rank = Number(square[1]);
+
+  return (file + rank) % 2 === 0 ? "light" : "dark";
+}
+
+function isCentralSquare(square) {
+  return ["c3", "d3", "e3", "f3", "c4", "d4", "e4", "f4", "c5", "d5", "e5", "f5", "c6", "d6", "e6", "f6"].includes(square);
+}
+
+function isOpponentHalf(square, color) {
+  const rank = Number(square[1]);
+
+  if (color === "w") {
+    return rank >= 5;
   }
 
-  return (
-    String.fromCharCode(
-      97 + col
-    ) +
-    String(
-      8 - row
-    )
-  );
+  return rank <= 4;
 }
 
-function isInsideBoard(
-  row,
-  col
-) {
-  return (
-    row >= 0 &&
-    row < 8 &&
-    col >= 0 &&
-    col < 8
-  );
+function isPawnAttackedByOpponentPawn(chess, square, color) {
+  const enemy = oppositeColor(color);
+
+  for (const file of FILES) {
+    for (let rank = 1; rank <= 8; rank++) {
+      const from = `${file}${rank}`;
+      const piece = chess.get(from);
+
+      if (!piece || piece.color !== enemy || piece.type !== "p") {
+        continue;
+      }
+
+      const fromFile = FILES.indexOf(file);
+      const targetFile = FILES.indexOf(square[0]);
+      const targetRank = Number(square[1]);
+
+      if (enemy === "w") {
+        if (
+          targetRank === rank + 1 &&
+          Math.abs(targetFile - fromFile) === 1
+        ) {
+          return true;
+        }
+      } else {
+        if (
+          targetRank === rank - 1 &&
+          Math.abs(targetFile - fromFile) === 1
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+function hasFriendlySupport(chess, square, color) {
+  const moves = chess.moves({
+    square,
+    verbose: true
+  });
+
+  return moves.some(move => {
+    const targetPiece = chess.get(move.to);
+
+    return (
+      targetPiece &&
+      targetPiece.color === color
+    );
+  });
+}
+
+function pieceSymbol(color, type) {
+  return PIECES[color]?.[type] || "";
 }
 
 
 /* =========================================================
-   GAME PHASE
-   ========================================================= */
+   예제 PGN
+========================================================= */
 
-function getGamePhase(
-  chess
-) {
-  const moveCount =
-    chess.history().length;
+const EXAMPLE_PGN = `[Event "Human Chess Insight Example"]
+[Site "?"]
+[Date "2026.10.05"]
+[Round "1"]
+[White "White"]
+[Black "Black"]
+[Result "*"]
 
-  const queens =
-    countPieces(
-      chess,
-      "w",
-      "q"
-    ) +
-    countPieces(
-      chess,
-      "b",
-      "q"
-    );
+1. c4 e5
+2. g3 Nc6
+3. Bg2 Bc5
+4. e3 Nf6
+5. Ne2 O-O
+6. O-O d6
+7. d4`;
 
-  const rooks =
-    countPieces(
-      chess,
-      "w",
-      "r"
-    ) +
-    countPieces(
-      chess,
-      "b",
-      "r"
-    );
 
-  const minorPieces =
-    countPieces(
-      chess,
-      "w",
-      "b"
-    ) +
-    countPieces(
-      chess,
-      "b",
-      "b"
-    ) +
-    countPieces(
-      chess,
-      "w",
-      "n"
-    ) +
-    countPieces(
-      chess,
-      "b",
-      "n"
-    );
+/* =========================================================
+   엔진
+========================================================= */
 
-  if (
-    moveCount <= 12 &&
-    queens >= 2 &&
-    rooks >= 4 &&
-    minorPieces >= 6
-  ) {
-    return "opening";
-  }
-
-  if (
-    queens === 0 ||
-    (
-      rooks <= 2 &&
-      minorPieces <= 2
-    )
-  ) {
-    return "endgame";
-  }
-
-  return "middlegame";
+function setEngineStatus(text, state = "") {
+  els.engineStatus.textContent = text;
+  els.engineStatus.className = `status ${state}`;
 }
 
-function getPhaseName(
-  phase
-) {
+function initEngine() {
+  try {
+    engine = new Worker(STOCKFISH_PATH);
+
+    engine.onmessage = handleEngineMessage;
+
+    engine.onerror = () => {
+      engineReady = false;
+      engineBusy = false;
+      setEngineStatus("엔진 오류", "error");
+    };
+
+    engine.postMessage("uci");
+  } catch (error) {
+    console.error(error);
+    setEngineStatus("엔진을 불러오지 못했습니다.", "error");
+  }
+}
+
+function handleEngineMessage(event) {
+  const message = String(event.data || "");
+
+  if (message === "uciok") {
+    engine.postMessage("setoption name MultiPV value 3");
+    engine.postMessage("isready");
+    return;
+  }
+
+  if (message === "readyok") {
+    engineReady = true;
+    setEngineStatus("Stockfish 준비 완료", "ready");
+    return;
+  }
+
+  if (message.startsWith("info")) {
+    const depthMatch = message.match(/\bdepth\s+(\d+)/);
+    const multipvMatch = message.match(/\bmultipv\s+(\d+)/);
+    const scoreMatch = message.match(/\bscore\s+(cp|mate)\s+(-?\d+)/);
+    const pvMatch = message.match(/\bpv\s+(.+)$/);
+
+    const depth = depthMatch
+      ? Number(depthMatch[1])
+      : 0;
+
+    const multiPv = multipvMatch
+      ? Number(multipvMatch[1])
+      : 1;
+
+    let score = null;
+
+    if (scoreMatch) {
+      score = {
+        type: scoreMatch[1],
+        value: Number(scoreMatch[2])
+      };
+    }
+
+    const pv = pvMatch
+      ? pvMatch[1].trim().split(/\s+/)
+      : [];
+
+    engineLines[multiPv - 1] = {
+      depth,
+      score,
+      pv
+    };
+
+    currentDepth = Math.max(currentDepth, depth);
+
+    if (els.depthValue) {
+      els.depthValue.textContent = currentDepth
+        ? `d${currentDepth}`
+        : "—";
+    }
+
+    return;
+  }
+
+  if (message.startsWith("bestmove")) {
+    engineBusy = false;
+
+    if (engineResolve) {
+      const resolve = engineResolve;
+      engineResolve = null;
+
+      resolve(engineLines.filter(Boolean));
+    }
+  }
+}
+
+function analyzeWithEngine(fen, depth = 12) {
+  return new Promise(resolve => {
+    if (!engineReady || !engine) {
+      resolve([]);
+      return;
+    }
+
+    engineBusy = true;
+    engineLines = [];
+    currentDepth = 0;
+    engineResolve = resolve;
+
+    engine.postMessage("stop");
+    engine.postMessage(`position fen ${fen}`);
+    engine.postMessage(`go depth ${depth}`);
+  });
+}
+
+function scoreToWhitePerspective(score) {
+  if (!score) {
+    return null;
+  }
+
+  if (score.type === "mate") {
+    return score.value > 0
+      ? 100000
+      : -100000;
+  }
+
+  return score.value / 100;
+}
+
+function formatEvaluation(score) {
+  if (!score) {
+    return "—";
+  }
+
+  if (score.type === "mate") {
+    return score.value > 0
+      ? `#${score.value}`
+      : `#-${Math.abs(score.value)}`;
+  }
+
+  const cp = score.value / 100;
+
+  if (Math.abs(cp) < 0.05) {
+    return "0.00";
+  }
+
+  return cp > 0
+    ? `+${cp.toFixed(2)}`
+    : cp.toFixed(2);
+}
+
+
+/* =========================================================
+   게임 단계
+========================================================= */
+
+function countPieces(chess) {
+  const counts = {
+    w: {
+      p: 0,
+      n: 0,
+      b: 0,
+      r: 0,
+      q: 0,
+      k: 0
+    },
+    b: {
+      p: 0,
+      n: 0,
+      b: 0,
+      r: 0,
+      q: 0,
+      k: 0
+    }
+  };
+
+  for (const file of FILES) {
+    for (let rank = 1; rank <= 8; rank++) {
+      const piece = chess.get(`${file}${rank}`);
+
+      if (piece) {
+        counts[piece.color][piece.type]++;
+      }
+    }
+  }
+
+  return counts;
+}
+
+function getGamePhase(chess, ply = 0) {
+  const counts = countPieces(chess);
+
+  const queens = counts.w.q + counts.b.q;
+  const rooks = counts.w.r + counts.b.r;
+  const minors =
+    counts.w.n +
+    counts.w.b +
+    counts.b.n +
+    counts.b.b;
+
+  const nonPawnMaterial =
+    counts.w.n * PIECE_VALUES.n +
+    counts.w.b * PIECE_VALUES.b +
+    counts.w.r * PIECE_VALUES.r +
+    counts.w.q * PIECE_VALUES.q +
+    counts.b.n * PIECE_VALUES.n +
+    counts.b.b * PIECE_VALUES.b +
+    counts.b.r * PIECE_VALUES.r +
+    counts.b.q * PIECE_VALUES.q;
+
+  /*
+    퀸이 없다는 이유 하나만으로 엔드게임이라고 하지 않는다.
+    실제 남은 기물의 양을 함께 본다.
+  */
+
   if (
-    phase === "opening"
+    queens === 0 &&
+    (
+      rooks + minors <= 4 ||
+      nonPawnMaterial <= 13
+    )
+  ) {
+    return "엔드게임";
+  }
+
+  if (
+    ply <= 20 &&
+    (
+      counts.w.q >= 1 ||
+      counts.b.q >= 1
+    )
   ) {
     return "오프닝";
   }
 
   if (
-    phase === "endgame"
+    queens >= 1 &&
+    (
+      ply <= 24 ||
+      rooks + minors >= 7
+    )
   ) {
+    return "미들게임";
+  }
+
+  if (rooks + minors <= 5) {
     return "엔드게임";
   }
 
@@ -1071,1814 +464,1227 @@ function getPhaseName(
 
 
 /* =========================================================
-   MATERIAL
-   ========================================================= */
+   물질 분석
+========================================================= */
 
-function analyzeMaterial(
-  chess
-) {
-  const result = {
-    white: {
-      pieces: {},
-      total: 0
-    },
+function analyzeMaterial(chess) {
+  const counts = countPieces(chess);
 
-    black: {
-      pieces: {},
-      total: 0
-    },
-
-    difference: 0,
-
-    type: "equal",
-
-    relevance: "low"
+  const material = {
+    w: 0,
+    b: 0
   };
 
-  for (
-    const color of [
-      "w",
-      "b"
-    ]
-  ) {
-    const side =
-      color === "w"
-        ? result.white
-        : result.black;
-
-    for (
-      const type of [
-        "p",
-        "n",
-        "b",
-        "r",
-        "q"
-      ]
-    ) {
-      const count =
-        countPieces(
-          chess,
-          color,
-          type
-        );
-
-      side.pieces[type] =
-        count;
-
-      side.total +=
-        count *
+  for (const color of ["w", "b"]) {
+    for (const type of ["p", "n", "b", "r", "q"]) {
+      material[color] +=
+        counts[color][type] *
         PIECE_VALUES[type];
     }
   }
 
-  result.difference =
-    Number(
-      (
-        result.white.total -
-        result.black.total
-      ).toFixed(1)
-    );
+  const difference =
+    material.w - material.b;
 
-  const d =
-    result.difference;
+  let text = "물질적으로 균형이 맞습니다.";
 
-  if (
-    Math.abs(d) < 0.3
-  ) {
-    result.type =
-      "equal";
-  } else if (
-    Math.abs(d) < 1.5
-  ) {
-    result.type =
-      "pawn_advantage";
-  } else if (
-    Math.abs(d) < 3.5
-  ) {
-    result.type =
-      "minor_piece_advantage";
-  } else if (
-    Math.abs(d) < 5.5
-  ) {
-    result.type =
-      "exchange_or_multiple_pawns";
-  } else {
-    result.type =
-      "major_material_advantage";
+  if (difference > 0.2) {
+    text =
+      `백이 약 ${difference.toFixed(1)}점의 물질적 우세를 가지고 있습니다.`;
+  } else if (difference < -0.2) {
+    text =
+      `흑이 약 ${Math.abs(difference).toFixed(1)}점의 물질적 우세를 가지고 있습니다.`;
   }
 
-  result.relevance =
-    Math.abs(d) >= 1.5
-      ? "medium"
-      : "low";
+  return {
+    counts,
+    material,
+    difference,
+    text
+  };
+}
+
+
+/* =========================================================
+   비숍 분석
+========================================================= */
+
+function getBishopDiagonalInfo(chess, square, color) {
+  const fileIndex = FILES.indexOf(square[0]);
+  const rank = Number(square[1]);
+
+  const directions = [
+    [1, 1],
+    [1, -1],
+    [-1, 1],
+    [-1, -1]
+  ];
+
+  const result = [];
+
+  for (const [df, dr] of directions) {
+    let file = fileIndex + df;
+    let nextRank = rank + dr;
+
+    const ray = [];
+    let blocker = null;
+
+    while (
+      file >= 0 &&
+      file < 8 &&
+      nextRank >= 1 &&
+      nextRank <= 8
+    ) {
+      const target = `${FILES[file]}${nextRank}`;
+      ray.push(target);
+
+      const piece = chess.get(target);
+
+      if (piece) {
+        blocker = {
+          square: target,
+          piece
+        };
+        break;
+      }
+
+      file += df;
+      nextRank += dr;
+    }
+
+    result.push({
+      direction: [df, dr],
+      squares: ray,
+      blocker
+    });
+  }
+
+  return result;
+}
+
+function getCentralPawnBlockers(chess, square, color) {
+  const info = getBishopDiagonalInfo(chess, square, color);
+
+  const blockers = [];
+
+  for (const diagonal of info) {
+    if (!diagonal.blocker) {
+      continue;
+    }
+
+    const blocker = diagonal.blocker;
+
+    if (
+      blocker.piece.color === color &&
+      blocker.piece.type === "p" &&
+      isCentralSquare(blocker.square)
+    ) {
+      blockers.push(blocker);
+    }
+  }
+
+  return blockers;
+}
+
+function getBishopLegalMoves(chess, square) {
+  try {
+    return chess.moves({
+      square,
+      verbose: true
+    });
+  } catch {
+    return [];
+  }
+}
+
+function bishopContactsOpponent(chess, square, color) {
+  const info = getBishopDiagonalInfo(chess, square, color);
+
+  for (const diagonal of info) {
+    if (!diagonal.blocker) {
+      continue;
+    }
+
+    if (
+      diagonal.blocker.piece.color === oppositeColor(color)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function bishopActivityScore(chess, square, color) {
+  const legalMoves = getBishopLegalMoves(chess, square);
+
+  const emptyMoves = legalMoves.filter(move => {
+    return !chess.get(move.to);
+  });
+
+  const captures = legalMoves.filter(move => {
+    return move.captured;
+  });
+
+  const contacts = bishopContactsOpponent(
+    chess,
+    square,
+    color
+  );
+
+  const centralPawnBlockers =
+    getCentralPawnBlockers(
+      chess,
+      square,
+      color
+    );
+
+  let score = 0;
+
+  score += Math.min(emptyMoves.length, 7) * 0.7;
+  score += captures.length * 1.2;
+
+  if (contacts) {
+    score += 2.0;
+  }
+
+  score -= centralPawnBlockers.length * 1.1;
+
+  return {
+    score,
+    legalMoves,
+    emptyMoves,
+    captures,
+    contacts,
+    centralPawnBlockers
+  };
+}
+
+function getBishopImprovementMoves(chess, square, color) {
+  const moves = getBishopLegalMoves(chess, square);
+
+  const scored = moves.map(move => {
+    let score = 0;
+
+    if (isCentralSquare(move.to)) {
+      score += 1;
+    }
+
+    if (isOpponentHalf(move.to, color)) {
+      score += 1;
+    }
+
+    if (move.captured) {
+      score += 1.5;
+    }
+
+    return {
+      move,
+      score
+    };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  return scored
+    .slice(0, 3)
+    .map(item => item.move.to);
+}
+
+function describeBishop(chess, square, color) {
+  const activity = bishopActivityScore(
+    chess,
+    square,
+    color
+  );
+
+  const centralBlockers =
+    activity.centralPawnBlockers;
+
+  const legalMoves = activity.legalMoves;
+  const moveCount = legalMoves.length;
+
+  const contactsOpponent =
+    activity.contacts;
+
+  let label = "활동적인 비숍";
+  let explanation = "";
+  let improvement = "";
+
+  /*
+    강한 판정을 피한다.
+    단순히 폰 하나가 대각선을 막았다고
+    나쁜 비숍이라고 하지 않는다.
+  */
+
+  if (
+    centralBlockers.length >= 2 &&
+    moveCount <= 4 &&
+    !contactsOpponent
+  ) {
+    label = "나쁜 비숍";
+
+    explanation =
+      `${colorName(color)}의 ${square} 비숍은 자기 중앙 폰들에 의해 여러 대각선의 활동이 제한되어 있습니다. 현재 구조에서는 비숍이 장기적으로 활동할 공간이 좁습니다.`;
+
+    improvement =
+      "비숍의 활동을 방해하는 폰 구조를 바꾸거나 더 좋은 대각선으로 이동할 방법을 찾는 것이 중요합니다.";
+  } else if (
+    centralBlockers.length >= 1 &&
+    moveCount <= 6 &&
+    !contactsOpponent
+  ) {
+    label = "활동이 제한된 비숍";
+
+    const blockerSquares =
+      centralBlockers
+        .map(item => item.square)
+        .join(", ");
+
+    explanation =
+      `${colorName(color)}의 ${square} 비숍은 ${blockerSquares}의 자기 폰 때문에 한쪽 이상의 주요 대각선 활동이 제한되어 있습니다. 다만 현재 위치에서 나갈 수 있는 길이 남아 있어 아직 나쁜 비숍이라고 단정할 정도는 아닙니다.`;
+
+    improvement =
+      "더 좋은 대각선을 확보하거나 현재 폰 구조가 비숍의 활동을 방해하지 않도록 배치하는 방법을 살펴볼 수 있습니다.";
+  } else if (
+    centralBlockers.length >= 1 &&
+    contactsOpponent
+  ) {
+    label = "활동적인 비숍";
+
+    explanation =
+      `${colorName(color)}의 ${square} 비숍은 일부 대각선이 자기 폰에 의해 제한되어 있지만, 현재 다른 대각선을 통해 실제로 상대 기물이나 폰과 접촉하고 있어 활동성이 유지되고 있습니다.`;
+
+    improvement =
+      "현재의 활동을 유지하면서 더 영향력이 큰 대각선을 확보할 수 있는지 살펴보는 것이 좋습니다.";
+  } else if (
+    contactsOpponent ||
+    activity.score >= 4
+  ) {
+    label = "활동적인 비숍";
+
+    explanation =
+      `${colorName(color)}의 ${square} 비숍은 열린 대각선을 통해 실제로 상대 기물이나 폰에 영향을 줄 수 있어 활동적인 상태입니다.`;
+
+    improvement =
+      "현재의 활동을 유지하면서 더 중요한 대상을 압박할 수 있는 대각선을 찾는 것이 좋습니다.";
+  } else {
+    label = "개선 여지가 있는 비숍";
+
+    explanation =
+      `${colorName(color)}의 ${square} 비숍은 현재 이동할 수 있는 대각선이 제한적입니다. 당장 나쁜 비숍이라고 할 정도는 아니지만 더 좋은 위치를 찾을 여지가 있습니다.`;
+
+    improvement =
+      "비숍이 더 넓은 대각선이나 중요한 대상을 바라볼 수 있도록 위치를 개선하는 방법을 찾아볼 수 있습니다.";
+  }
+
+  const improvementMoves =
+    getBishopImprovementMoves(
+      chess,
+      square,
+      color
+    );
+
+  if (
+    improvementMoves.length > 0 &&
+    label !== "활동적인 비숍"
+  ) {
+    improvement +=
+      ` 현재 위치에서는 ${improvementMoves.join(", ")} 같은 경로를 검토할 수 있습니다.`;
+  }
+
+  return {
+    square,
+    color,
+    type: "b",
+    label,
+    explanation,
+    improvement,
+    legalMoveCount: moveCount,
+    centralBlockers,
+    contactsOpponent,
+    improvementMoves,
+    activityScore: activity.score
+  };
+}
+
+
+/* =========================================================
+   나이트 분석
+========================================================= */
+
+function squareCanBeAttackedByEnemyPawn(chess, square, color) {
+  return isPawnAttackedByOpponentPawn(
+    chess,
+    square,
+    color
+  );
+}
+
+function isKnightOutpostCandidate(chess, square, color) {
+  if (!isOpponentHalf(square, color)) {
+    return false;
+  }
+
+  if (squareCanBeAttackedByEnemyPawn(chess, square, color)) {
+    return false;
+  }
+
+  const piece = chess.get(square);
+
+  if (piece && piece.color !== color) {
+    return false;
+  }
+
+  const supported =
+    hasFriendlySupport(
+      chess,
+      square,
+      color
+    );
+
+  return supported;
+}
+
+function findKnightOutposts(chess, color) {
+  const candidates = [];
+
+  for (const file of FILES) {
+    for (let rank = 1; rank <= 8; rank++) {
+      const square = `${file}${rank}`;
+
+      if (
+        isKnightOutpostCandidate(
+          chess,
+          square,
+          color
+        )
+      ) {
+        let score = 0;
+
+        if (isCentralSquare(square)) {
+          score += 2;
+        }
+
+        if (hasFriendlySupport(chess, square, color)) {
+          score += 2;
+        }
+
+        if (
+          !squareCanBeAttackedByEnemyPawn(
+            chess,
+            square,
+            color
+          )
+        ) {
+          score += 2;
+        }
+
+        candidates.push({
+          square,
+          score
+        });
+      }
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  return candidates;
+}
+
+function analyzeKnight(chess, square, color) {
+  const moves = chess.moves({
+    square,
+    verbose: true
+  });
+
+  const legalMoves = moves.length;
+
+  const usefulMoves = moves.filter(move => {
+    return (
+      isOpponentHalf(move.to, color) ||
+      isCentralSquare(move.to) ||
+      Boolean(move.captured)
+    );
+  });
+
+  const outpostCandidates =
+    findKnightOutposts(
+      chess,
+      color
+    );
+
+  let label = "기동 가능한 나이트";
+  let explanation =
+    `${colorName(color)}의 ${square} 나이트는 ${legalMoves}개의 합법적인 이동을 가지고 있습니다.`;
+
+  let improvement = "";
+
+  if (outpostCandidates.length > 0) {
+    const best =
+      outpostCandidates[0].square;
+
+    label = "지원점을 찾을 수 있는 나이트";
+
+    explanation +=
+      ` 특히 ${best} 같은 안정적인 지원점을 확보할 가능성이 있습니다.`;
+
+    improvement =
+      "상대 폰에게 쉽게 쫓겨나지 않고 자기 기물이나 폰의 지원을 받을 수 있는 위치를 확보하는 것이 중요합니다.";
+  } else if (usefulMoves.length >= 4) {
+    label = "활동적인 나이트";
+
+    explanation +=
+      " 중앙이나 상대 진영으로 진입할 수 있는 선택지가 충분해 활동 범위가 괜찮습니다.";
+
+    improvement =
+      "단순히 전진하는 것보다 실제로 유지할 수 있고 상대에게 불편을 주는 위치를 찾는 것이 중요합니다.";
+  } else {
+    label = "개선 여지가 있는 나이트";
+
+    explanation +=
+      " 현재 유용하게 사용할 수 있는 이동이 많지 않아 더 좋은 위치를 찾을 필요가 있습니다.";
+
+    improvement =
+      "상대 폰에게 쉽게 쫓겨나지 않으면서 지원받을 수 있는 안정적인 위치를 찾는 것이 좋습니다.";
+  }
+
+  return {
+    square,
+    color,
+    type: "n",
+    label,
+    explanation,
+    improvement,
+    legalMoveCount: legalMoves,
+    usefulMoveCount: usefulMoves.length,
+    outpostCandidates,
+    activityScore:
+      usefulMoves.length +
+      outpostCandidates.length * 2
+  };
+}
+
+
+/* =========================================================
+   전체 기물 활동성
+========================================================= */
+
+function analyzeMinorPieces(chess) {
+  const result = {
+    w: {
+      bishops: [],
+      knights: []
+    },
+    b: {
+      bishops: [],
+      knights: []
+    },
+    all: [],
+    summary: "",
+    dominantSide: null
+  };
+
+  for (const color of ["w", "b"]) {
+    for (const file of FILES) {
+      for (let rank = 1; rank <= 8; rank++) {
+        const square = `${file}${rank}`;
+        const piece = chess.get(square);
+
+        if (!piece || piece.color !== color) {
+          continue;
+        }
+
+        if (piece.type === "b") {
+          const bishop =
+            describeBishop(
+              chess,
+              square,
+              color
+            );
+
+          result[color].bishops.push(bishop);
+          result.all.push(bishop);
+        }
+
+        if (piece.type === "n") {
+          const knight =
+            analyzeKnight(
+              chess,
+              square,
+              color
+            );
+
+          result[color].knights.push(knight);
+          result.all.push(knight);
+        }
+      }
+    }
+  }
+
+  const whiteScore =
+    result.w.bishops.reduce(
+      (sum, item) => sum + item.activityScore,
+      0
+    ) +
+    result.w.knights.reduce(
+      (sum, item) => sum + item.activityScore,
+      0
+    );
+
+  const blackScore =
+    result.b.bishops.reduce(
+      (sum, item) => sum + item.activityScore,
+      0
+    ) +
+    result.b.knights.reduce(
+      (sum, item) => sum + item.activityScore,
+      0
+    );
+
+  if (whiteScore > blackScore + 2) {
+    result.dominantSide = "w";
+  } else if (blackScore > whiteScore + 2) {
+    result.dominantSide = "b";
+  }
+
+  if (result.dominantSide) {
+    result.summary =
+      `${colorName(result.dominantSide)}의 기물이 현재 더 넓은 활동 범위와 선택지를 가지고 있습니다.`;
+  } else {
+    result.summary =
+      "양쪽 기물의 활동성에 뚜렷한 차이가 크지 않습니다.";
+  }
 
   return result;
 }
 
 
 /* =========================================================
-   BISHOP ANALYSIS
-   ========================================================= */
-
-/*
- * 한 비숍에서 실제로 확인하는 것:
- *
- * 1. 현재 위치에서 각 대각선이 어디까지 열려 있는가
- * 2. 자기 폰이 실제로 활동을 막고 있는가
- * 3. 상대 기물/폰과의 상호작용이 있는가
- * 4. 열린 대각선이 있는가
- * 5. 현재 위치가 단순히 "나쁘게 생긴 것"인지
- *    아니면 실제로 활동이 제한된 것인지
- *
- * 중요한 점:
- * "한 방향이 막혀 있다"
- * ≠
- * "Bad Bishop"
- *
- * 실제 활동 가능한 대각선이 남아 있다면
- * 그 사실을 반영한다.
- */
-
-
-/* ---------------------------------------------------------
-   Bishop rays
-   --------------------------------------------------------- */
-
-function getBishopRays(
-  chess,
-  square
-) {
-  const board =
-    chess.board();
-
-  const start =
-    squareToCoords(
-      square
-    );
-
-  const directions = [
-    [-1, -1],
-    [-1, 1],
-    [1, -1],
-    [1, 1]
-  ];
-
-  const rays = [];
-
-  directions.forEach(
-    ([dr, dc]) => {
-      const ray = [];
-
-      let row =
-        start.row + dr;
-
-      let col =
-        start.col + dc;
-
-      while (
-        isInsideBoard(
-          row,
-          col
-        )
-      ) {
-        const target =
-          board[row][col];
-
-        const targetSquare =
-          coordsToSquare(
-            row,
-            col
-          );
-
-        ray.push({
-          square:
-            targetSquare,
-
-          piece:
-            target || null,
-
-          occupied:
-            Boolean(target),
-
-          own:
-            Boolean(
-              target &&
-              target.color ===
-                chess.get(
-                  square
-                )?.color
-            ),
-
-          enemy:
-            Boolean(
-              target &&
-              target.color !==
-                chess.get(
-                  square
-                )?.color
-            )
-        });
-
-        if (target) {
-          break;
-        }
-
-        row += dr;
-        col += dc;
-      }
-
-      rays.push(ray);
-    }
-  );
-
-  return rays;
-}
-
-
-/* ---------------------------------------------------------
-   Bishop accessible squares
-   --------------------------------------------------------- */
-
-function getBishopAccessibleSquares(
-  chess,
-  square
-) {
-  const piece =
-    chess.get(square);
-
-  if (
-    !piece ||
-    piece.type !== "b"
-  ) {
-    return [];
-  }
-
-  const board =
-    chess.board();
-
-  const start =
-    squareToCoords(
-      square
-    );
-
-  const directions = [
-    [-1, -1],
-    [-1, 1],
-    [1, -1],
-    [1, 1]
-  ];
-
-  const accessible = [];
-
-  directions.forEach(
-    ([dr, dc]) => {
-      let row =
-        start.row + dr;
-
-      let col =
-        start.col + dc;
-
-      while (
-        isInsideBoard(
-          row,
-          col
-        )
-      ) {
-        const target =
-          board[row][col];
-
-        const squareName =
-          coordsToSquare(
-            row,
-            col
-          );
-
-        if (!target) {
-          accessible.push(
-            squareName
-          );
-        } else {
-          if (
-            target.color !==
-            piece.color
-          ) {
-            accessible.push(
-              squareName
-            );
-          }
-
-          break;
-        }
-
-        row += dr;
-        col += dc;
-      }
-    }
-  );
-
-  return accessible;
-}
-
-
-/* ---------------------------------------------------------
-   Bishop direction information
-   --------------------------------------------------------- */
-
-function bishopRayInfo(
-  chess,
-  square
-) {
-  const piece =
-    chess.get(square);
-
-  if (
-    !piece ||
-    piece.type !== "b"
-  ) {
-    return null;
-  }
-
-  const board =
-    chess.board();
-
-  const start =
-    squareToCoords(
-      square
-    );
-
-  const directions = [
-    {
-      name: "위-왼쪽",
-      dr: -1,
-      dc: -1
-    },
-    {
-      name: "위-오른쪽",
-      dr: -1,
-      dc: 1
-    },
-    {
-      name: "아래-왼쪽",
-      dr: 1,
-      dc: -1
-    },
-    {
-      name: "아래-오른쪽",
-      dr: 1,
-      dc: 1
-    }
-  ];
-
-  return directions.map(
-    direction => {
-      let row =
-        start.row +
-        direction.dr;
-
-      let col =
-        start.col +
-        direction.dc;
-
-      const squares = [];
-
-      let blocker = null;
-
-      while (
-        isInsideBoard(
-          row,
-          col
-        )
-      ) {
-        const target =
-          board[row][col];
-
-        const targetSquare =
-          coordsToSquare(
-            row,
-            col
-          );
-
-        if (!target) {
-          squares.push(
-            targetSquare
-          );
-        } else {
-          blocker = {
-            square:
-              targetSquare,
-
-            color:
-              target.color,
-
-            type:
-              target.type
-          };
-
-          break;
-        }
-
-        row +=
-          direction.dr;
-
-        col +=
-          direction.dc;
-      }
-
-      return {
-        name:
-          direction.name,
-
-        squares,
-
-        blocker
-      };
-    }
-  );
-}
-
-
-/* ---------------------------------------------------------
-   Central pawn test
-   --------------------------------------------------------- */
-
-function isCentralPawnSquare(
-  square
-) {
-  if (!square) {
-    return false;
-  }
-
-  const file =
-    square.charCodeAt(0) -
-    97;
-
-  const rank =
-    Number(square[1]);
-
-  /*
-   * 중앙 파일:
-   * c,d,e,f
-   *
-   * 중앙 폰 판단은
-   * 단순히 중앙에 있는 모든 폰을
-   * 나쁜 것으로 취급하지 않는다.
-   */
-  return (
-    file >= 2 &&
-    file <= 5 &&
-    rank >= 3 &&
-    rank <= 6
-  );
-}
-
-
-/* ---------------------------------------------------------
-   Find meaningful bishop blockers
-   --------------------------------------------------------- */
-
-function analyzeBishopBlockers(
-  chess,
-  square
-) {
-  const piece =
-    chess.get(square);
-
-  if (
-    !piece ||
-    piece.type !== "b"
-  ) {
-    return {
-      blockers: [],
-      centralBlockers: [],
-      pawnBlockers: []
-    };
-  }
-
-  const rays =
-    bishopRayInfo(
+   포지션 스냅샷
+========================================================= */
+
+function createPositionSnapshot(chess, ply) {
+  const material = analyzeMaterial(chess);
+  const minorPieces =
+    analyzeMinorPieces(chess);
+
+  const phase =
+    getGamePhase(
       chess,
-      square
+      ply
     );
-
-  const blockers = [];
-  const centralBlockers = [];
-  const pawnBlockers = [];
-
-  rays.forEach(
-    ray => {
-      if (!ray.blocker) {
-        return;
-      }
-
-      const blocker =
-        ray.blocker;
-
-      blockers.push({
-        ...blocker,
-        direction:
-          ray.name
-      });
-
-      if (
-        blocker.color ===
-        piece.color &&
-        blocker.type === "p"
-      ) {
-        pawnBlockers.push({
-          ...blocker,
-          direction:
-            ray.name
-        });
-
-        if (
-          isCentralPawnSquare(
-            blocker.square
-          )
-        ) {
-          centralBlockers.push({
-            ...blocker,
-            direction:
-              ray.name
-          });
-        }
-      }
-    }
-  );
 
   return {
-    blockers,
-    centralBlockers,
-    pawnBlockers
+    phase,
+    material,
+    minorPieces,
+
+    /*
+      다음 단계에서 채울 영역.
+    */
+    pawnStructure: null,
+    weakSquares: null,
+    space: null,
+    openFiles: null,
+    development: null,
+    initiative: null,
+    kingSafety: null,
+
+    dominantImbalance: null,
+    sideOfBoard: null,
+    counterplay: null,
+    preventivePlan: null,
+    fantasyPosition: null,
+    candidates: []
   };
 }
 
 
-/* ---------------------------------------------------------
-   Bishop activity
-   --------------------------------------------------------- */
+/* =========================================================
+   포지션 생성
+========================================================= */
 
-function analyzeBishopActivity(
-  chess,
-  square
-) {
-  const piece =
-    chess.get(square);
+function buildPositions(chess) {
+  const history = chess.history({
+    verbose: true
+  });
 
-  if (
-    !piece ||
-    piece.type !== "b"
-  ) {
-    return null;
-  }
+  const replay = new Chess();
 
-  const accessible =
-    getBishopAccessibleSquares(
-      chess,
-      square
-    );
+  const result = [];
 
-  const rays =
-    bishopRayInfo(
-      chess,
-      square
-    );
+  result.push({
+    ply: 0,
+    fen: replay.fen(),
+    move: null,
+    san: null
+  });
 
-  const blockers =
-    analyzeBishopBlockers(
-      chess,
-      square
-    );
+  for (let i = 0; i < history.length; i++) {
+    const move = history[i];
 
-  let enemyTargets = 0;
+    replay.move({
+      from: move.from,
+      to: move.to,
+      promotion: move.promotion
+    });
 
-  rays.forEach(
-    ray => {
-      if (
-        ray.blocker &&
-        ray.blocker.color !==
-          piece.color
-      ) {
-        enemyTargets++;
-      }
-    }
-  );
-
-  const openDirections =
-    rays.filter(
-      ray =>
-        !ray.blocker
-    ).length;
-
-  const activeDirections =
-    rays.filter(
-      ray =>
-        ray.squares.length >= 2
-    ).length;
-
-  /*
-   * 활동성은 단순 이동 칸 숫자가 아니라
-   * 실제 열린 대각선과 상대와의 접촉을 함께 본다.
-   */
-  const activityScore =
-    (
-      accessible.length * 0.45
-    ) +
-    (
-      openDirections * 1.5
-    ) +
-    (
-      activeDirections * 1.0
-    ) +
-    (
-      enemyTargets * 1.5
-    );
-
-  return {
-    accessibleSquares:
-      accessible,
-
-    accessibleCount:
-      accessible.length,
-
-    openDirections,
-
-    activeDirections,
-
-    enemyTargets,
-
-    activityScore,
-
-    blockers
-  };
-}
-
-
-/* ---------------------------------------------------------
-   Bishop color complex
-   --------------------------------------------------------- */
-
-function getSquareColor(
-  square
-) {
-  const { row, col } =
-    squareToCoords(
-      square
-    );
-
-  return (
-    (row + col) % 2 === 0
-      ? "light"
-      : "dark"
-  );
-}
-
-
-/* ---------------------------------------------------------
-   Bishop type
-   --------------------------------------------------------- */
-
-function classifyBishop(
-  chess,
-  square
-) {
-  const piece =
-    chess.get(square);
-
-  if (
-    !piece ||
-    piece.type !== "b"
-  ) {
-    return null;
-  }
-
-  const activity =
-    analyzeBishopActivity(
-      chess,
-      square
-    );
-
-  const blockers =
-    activity.blockers;
-
-  const centralPawnBlockers =
-    blockers.centralBlockers.length;
-
-  const totalPawnBlockers =
-    blockers.pawnBlockers.length;
-
-  const accessible =
-    activity.accessibleCount;
-
-  const openDirections =
-    activity.openDirections;
-
-  const enemyTargets =
-    activity.enemyTargets;
-
-  /*
-   * 실제 활동성이 충분하고
-   * 중앙 폰에 의한 지속적 제한이 약하다면
-   * Active / Good 쪽으로 본다.
-   */
-  if (
-    enemyTargets >= 1 &&
-    accessible >= 5 &&
-    centralPawnBlockers === 0
-  ) {
-    return {
-      type: "active",
-      label: "활동적인 비숍"
-    };
-  }
-
-  /*
-   * 중앙 폰이 실제 대각선 활동을 막고 있고
-   * 다른 대각선의 활동성도 낮다면
-   * Bad Bishop 쪽으로 분류한다.
-   */
-  if (
-    centralPawnBlockers >= 1 &&
-    accessible <= 4 &&
-    openDirections <= 2
-  ) {
-    return {
-      type: "bad",
-      label: "나쁜 비숍"
-    };
-  }
-
-  /*
-   * 구조적으로 중앙 폰과 같은 색에 놓여 있어도
-   * 실제 활동할 공간이 충분하면
-   * 무조건 Bad Bishop으로 판정하지 않는다.
-   */
-  if (
-    accessible >= 6 &&
-    openDirections >= 2
-  ) {
-    return {
-      type: "good",
-      label: "좋은 비숍"
-    };
-  }
-
-  /*
-   * 실제 공격 대상이 없더라도
-   * 열린 대각선이 충분하면 활동적인 상태로 본다.
-   */
-  if (
-    accessible >= 5 &&
-    openDirections >= 1
-  ) {
-    return {
-      type: "active",
-      label: "활동적인 비숍"
-    };
-  }
-
-  /*
-   * 애매한 경우
-   * Bad이라고 과잉 판정하지 않는다.
-   */
-  return {
-    type: "neutral",
-    label: "활동 여지가 있는 비숍"
-  };
-}
-
-
-/* ---------------------------------------------------------
-   Bishop improvement plans
-   --------------------------------------------------------- */
-
-function bishopCanMoveTo(
-  chess,
-  from,
-  to
-) {
-  try {
-    const moves =
-      chess.moves({
-        square: from,
-        verbose: true
-      });
-
-    return moves.some(
-      move =>
-        move.to === to
-    );
-  } catch {
-    return false;
-  }
-}
-
-function getBishopImprovementPlans(
-  chess,
-  bishop
-) {
-  const plans = [];
-
-  const {
-    square,
-    color
-  } = bishop;
-
-  /*
-   * -------------------------------------------------------
-   * 직접적인 비숍 이동
-   * -------------------------------------------------------
-   */
-
-  const directMoves =
-    getBishopAccessibleSquares(
-      chess,
-      square
-    );
-
-  /*
-   * 실제로 갈 수 있는 대표적인 개선 칸을 찾는다.
-   *
-   * 모든 이동을 "추천 수"라고 부르지 않고,
-   * 후보 계획으로만 저장한다.
-   */
-
-  const preferredSquares =
-    color === "b"
-      ? [
-          "d7",
-          "e6",
-          "f5",
-          "g4",
-          "h3",
-          "b7",
-          "a6"
-        ]
-      : [
-          "d2",
-          "e3",
-          "f4",
-          "g5",
-          "h6",
-          "b2",
-          "a3"
-        ];
-
-  preferredSquares.forEach(
-    target => {
-      if (
-        directMoves.includes(
-          target
-        )
-      ) {
-        plans.push({
-          kind:
-            "direct",
-          move:
-            `${square}-${target}`,
-          text:
-            `현재 비숍에서 ${target}로 이동할 수 있어 활동 범위를 개선할 여지가 있습니다.`
-        });
-      }
-    }
-  );
-
-  /*
-   * -------------------------------------------------------
-   * ...Bd7 / Bd2 계열
-   * -------------------------------------------------------
-   */
-
-  const naturalDevelopment =
-    color === "b"
-      ? "d7"
-      : "d2";
-
-  if (
-    directMoves.includes(
-      naturalDevelopment
-    )
-  ) {
-    plans.push({
-      kind:
-        "natural_development",
-      move:
-        naturalDevelopment,
-      text:
-        `${naturalDevelopment} 방향이 실제로 열려 있으므로 비숍을 그쪽으로 개선할 수 있습니다.`
+    result.push({
+      ply: i + 1,
+      fen: replay.fen(),
+      move,
+      san: move.san
     });
   }
 
-  /*
-   * -------------------------------------------------------
-   * ...b6 → ...Bb7
-   *
-   * 현재 비숍이 c8에 있고
-   * b7이 비어 있으며
-   * b6가 합법적인 전진이라면
-   * "가능한 개선 계획"으로만 제시한다.
-   * -------------------------------------------------------
-   */
-
-  if (
-    color === "b" &&
-    square === "c8"
-  ) {
-    const b7 =
-      chess.get("b7");
-
-    const b6 =
-      chess.get("b6");
-
-    const bPawn =
-      chess.get("b7");
-
-    if (
-      bPawn &&
-      bPawn.color === "b" &&
-      bPawn.type === "p"
-    ) {
-      const b6Moves =
-        chess.moves({
-          square: "b7",
-          verbose: true
-        });
-
-      const canB6 =
-        b6Moves.some(
-          move =>
-            move.to === "b6"
-        );
-
-      if (canB6) {
-        plans.push({
-          kind:
-            "fianchetto_plan",
-          move:
-            "...b6 → ...Bb7",
-          text:
-            "현재 c8 비숍의 활동을 장기적으로 넓히는 한 가지 계획으로 ...b6 뒤 ...Bb7을 고려할 수 있습니다."
-        });
-      }
-    }
-  }
-
-  /*
-   * -------------------------------------------------------
-   * ...g6 → ...Bg7
-   *
-   * g7 폰이 있고 g6가 가능하며
-   * Bg7로 이어질 수 있는 구조인지 확인한다.
-   * -------------------------------------------------------
-   */
-
-  if (
-    color === "b" &&
-    square === "f8"
-  ) {
-    const g7 =
-      chess.get("g7");
-
-    if (
-      g7 &&
-      g7.color === "b" &&
-      g7.type === "p"
-    ) {
-      const g6Moves =
-        chess.moves({
-          square: "g7",
-          verbose: true
-        });
-
-      const canG6 =
-        g6Moves.some(
-          move =>
-            move.to === "g6"
-        );
-
-      if (canG6) {
-        plans.push({
-          kind:
-            "fianchetto_plan",
-          move:
-            "...g6 → ...Bg7",
-          text:
-            "현재 구조에서 ...g6 이후 ...Bg7로 비숍의 대각선을 넓히는 계획이 가능한지 검토할 수 있습니다."
-        });
-      }
-    }
-  }
-
-  return plans;
-}
-
-
-/* ---------------------------------------------------------
-   Full bishop side analysis
-   --------------------------------------------------------- */
-
-function analyzeBishopsForColor(
-  chess,
-  color
-) {
-  const bishops =
-    findPieces(
-      chess.board(),
-      color,
-      "b"
-    );
-
-  return bishops.map(
-    bishop => {
-      const classification =
-        classifyBishop(
-          chess,
-          bishop.square
-        );
-
-      const activity =
-        analyzeBishopActivity(
-          chess,
-          bishop.square
-        );
-
-      const plans =
-        getBishopImprovementPlans(
-          chess,
-          {
-            square:
-              bishop.square,
-            color
-          }
-        );
-
-      return {
-        square:
-          bishop.square,
-
-        color,
-
-        squareColor:
-          getSquareColor(
-            bishop.square
-          ),
-
-        classification,
-
-        activity,
-
-        plans
-      };
-    }
-  );
-}
-
-
-/* ---------------------------------------------------------
-   Minor piece analysis
-   --------------------------------------------------------- */
-
-function analyzeMinorPieces(
-  chess
-) {
-  const whiteBishops =
-    analyzeBishopsForColor(
-      chess,
-      "w"
-    );
-
-  const blackBishops =
-    analyzeBishopsForColor(
-      chess,
-      "b"
-    );
-
-  return {
-    bishops: {
-      w: whiteBishops,
-      b: blackBishops
-    },
-
-    /*
-     * Knight 분석은 다음 단계에서 추가한다.
-     */
-    knights: {
-      w: [],
-      b: []
-    }
-  };
+  return result;
 }
 
 
 /* =========================================================
-   BISHOP HUMAN TEXT
-   ========================================================= */
+   보드
+========================================================= */
 
-function bishopDescription(
-  chess,
-  bishop
-) {
-  const side =
-    COLOR_NAMES[
-      bishop.color
-    ];
+function renderBoard(fen) {
+  const position = new Chess(fen);
+  const board = position.board();
 
-  const square =
-    bishop.square;
+  els.board.innerHTML = "";
 
-  const classification =
-    bishop.classification;
+  for (let row = 0; row < 8; row++) {
+    for (let col = 0; col < 8; col++) {
+      const square = `${FILES[col]}${8 - row}`;
+      const piece = board[row][col];
 
-  const activity =
-    bishop.activity;
+      const cell = document.createElement("div");
 
-  const blockers =
-    activity.blockers;
+      cell.className =
+        `sq ${squareColor(square)}`;
 
-  const centralBlockers =
-    blockers.centralBlockers;
+      cell.dataset.square = square;
 
-  const pawnBlockers =
-    blockers.pawnBlockers;
-
-  const plans =
-    bishop.plans;
-
-  if (
-    classification.type ===
-    "bad"
-  ) {
-    if (
-      centralBlockers.length
-    ) {
-      const squares =
-        centralBlockers
-          .map(
-            x =>
-              x.square
-          )
-          .join(", ");
-
-      return `${side}의 ${square} 비숍은 현재 자기 중앙 폰(${squares})에 의해 대각선 활동이 실제로 제한되어 있습니다. PDF의 비숍 관점에서 보면 이런 경우 비숍의 활동성을 개선할 방법을 찾는 것이 중요합니다.`;
-    }
-
-    return `${side}의 ${square} 비숍은 현재 활동 범위가 제한되어 있어 개선 계획이 필요한 상태입니다.`;
-  }
-
-  if (
-    classification.type ===
-    "active"
-  ) {
-    if (
-      activity.enemyTargets
-    ) {
-      return `${side}의 ${square} 비숍은 열린 대각선을 통해 상대 기물이나 폰과 실제로 접촉하고 있어 활동적인 비숍으로 볼 수 있습니다.`;
-    }
-
-    return `${side}의 ${square} 비숍은 여러 대각선이 열려 있고 활동할 수 있는 공간이 충분합니다.`;
-  }
-
-  if (
-    classification.type ===
-    "good"
-  ) {
-    return `${side}의 ${square} 비숍은 자기 폰에 의해 실질적으로 묶여 있지 않고 여러 대각선에서 활동할 수 있어 좋은 비숍 쪽에 가깝습니다.`;
-  }
-
-  /*
-   * neutral
-   */
-  if (
-    pawnBlockers.length
-  ) {
-    return `${side}의 ${square} 비숍에는 자기 폰에 의한 제한이 있지만, 현재 위치만으로 나쁜 비숍이라고 단정할 정도는 아닙니다. 실제 활동 경로를 함께 봐야 합니다.`;
-  }
-
-  return `${side}의 ${square} 비숍은 현재 뚜렷한 활동성 우위나 구조적 제한이 확정되지 않습니다.`;
-}
-
-
-/* ---------------------------------------------------------
-   Bishop plan text
-   --------------------------------------------------------- */
-
-function bishopPlanText(
-  bishop
-) {
-  if (
-    !bishop.plans.length
-  ) {
-    return "";
-  }
-
-  const plans =
-    bishop.plans
-      .slice(0, 2)
-      .map(
-        plan =>
-          plan.text
-      );
-
-  return plans.join(" ");
-}
-
-
-/* ---------------------------------------------------------
-   Render bishop factor
-   --------------------------------------------------------- */
-
-function renderBishopFactor(
-  chess,
-  minorPieces
-) {
-  const all =
-    [
-      ...minorPieces.bishops.w,
-      ...minorPieces.bishops.b
-    ];
-
-  if (!all.length) {
-    return "현재 포지션에는 비숍이 없습니다.";
-  }
-
-  const descriptions =
-    all.map(
-      bishop => {
-        const main =
-          bishopDescription(
-            chess,
-            bishop
+      if (piece) {
+        cell.textContent =
+          pieceSymbol(
+            piece.color,
+            piece.type
           );
-
-        const plan =
-          bishopPlanText(
-            bishop
-          );
-
-        return `
-          <div class="factor">
-            <strong>
-              ${COLOR_NAMES[bishop.color]}
-              ${bishop.square}
-              ·
-              ${bishop.classification.label}
-            </strong>
-
-            <p>
-              ${main}
-            </p>
-
-            ${
-              plan
-                ? `<p>${plan}</p>`
-                : ""
-            }
-          </div>
-        `;
       }
-    );
 
-  return descriptions.join("");
+      els.board.appendChild(cell);
+    }
+  }
 }
 
 
 /* =========================================================
-   POSITION SNAPSHOT
-   ========================================================= */
+   수순 목록
+========================================================= */
 
-function createPositionSnapshot(
-  chess
-) {
-  const phase =
-    getGamePhase(chess);
+function renderMoveList() {
+  els.moveList.innerHTML = "";
 
-  return {
-    fen:
-      chess.fen(),
+  const movePositions =
+    positions.slice(1);
 
-    turn:
-      chess.turn(),
+  for (let i = 0; i < movePositions.length; i += 2) {
+    const white = movePositions[i];
+    const black = movePositions[i + 1];
 
-    moveNumber:
-      chess.moveNumber(),
+    const row = document.createElement("div");
 
-    phase,
+    row.className = "moveRow";
 
-    material:
-      analyzeMaterial(
-        chess
-      ),
+    const number = document.createElement("span");
+    number.className = "moveNumber";
+    number.textContent = `${Math.floor(i / 2) + 1}.`;
 
-    /*
-     * STEP 2
-     */
-    minorPieces:
-      analyzeMinorPieces(
-        chess
-      ),
+    row.appendChild(number);
 
-    /*
-     * 이후 단계
-     */
-    pawnStructure:
-      null,
+    const whiteBtn = document.createElement("button");
+    whiteBtn.className = "moveButton";
+    whiteBtn.textContent = white?.san || "";
 
-    weakSquares:
-      null,
+    if (white) {
+      whiteBtn.dataset.ply = white.ply;
+    }
 
-    space:
-      null,
+    const blackBtn = document.createElement("button");
+    blackBtn.className = "moveButton";
+    blackBtn.textContent = black?.san || "";
 
-    center:
-      null,
+    if (black) {
+      blackBtn.dataset.ply = black.ply;
+    }
 
-    openFiles:
-      null,
+    row.appendChild(whiteBtn);
+    row.appendChild(blackBtn);
 
-    development:
-      null,
-
-    initiative:
-      null,
-
-    king:
-      null,
-
-    dominantImbalance:
-      null,
-
-    sideOfBoard:
-      null,
-
-    counterplay:
-      null,
-
-    preventivePlan:
-      null,
-
-    fantasyPosition:
-      null,
-
-    candidates:
-      []
-  };
-}
-
-
-/* =========================================================
-   MATERIAL TEXT
-   ========================================================= */
-
-function materialText(
-  material
-) {
-  const d =
-    material.difference;
-
-  if (
-    Math.abs(d) < 0.3
-  ) {
-    return "현재 기물 가치의 차이는 거의 없습니다.";
+    els.moveList.appendChild(row);
   }
 
-  if (d > 0) {
-    return `백이 약 ${Math.abs(
-      d
-    ).toFixed(
-      1
-    )}점의 물질적 우세를 가지고 있습니다.`;
+  els.moveList
+    .querySelectorAll(".moveButton")
+    .forEach(button => {
+      button.addEventListener("click", () => {
+        const ply = Number(button.dataset.ply);
+
+        if (!Number.isNaN(ply)) {
+          goToPly(ply);
+        }
+      });
+    });
+}
+
+
+/* =========================================================
+   평가
+========================================================= */
+
+function setProgress(value) {
+  if (!els.progressBar) {
+    return;
   }
-
-  return `흑이 약 ${Math.abs(
-    d
-  ).toFixed(
-    1
-  )}점의 물질적 우세를 가지고 있습니다.`;
-}
-
-
-/* =========================================================
-   HUMAN STRATEGY TEXT
-   ========================================================= */
-
-function buildInitialStrategyText(
-  snapshot
-) {
-  const phaseName =
-    getPhaseName(
-      snapshot.phase
-    );
-
-  return `현재는 ${phaseName}으로 분류됩니다. 이제 물질적 차이뿐 아니라 비숍의 실제 활동성과 자기 폰에 의한 제한 여부까지 함께 비교합니다.`;
-}
-
-
-/* =========================================================
-   RENDER HUMAN FACTORS
-   ========================================================= */
-
-function renderFactorsFromSnapshot(
-  snapshot
-) {
-  const phaseName =
-    getPhaseName(
-      snapshot.phase
-    );
-
-  const chess =
-    new Chess(
-      snapshot.fen
-    );
-
-  const bishopHtml =
-    renderBishopFactor(
-      chess,
-      snapshot.minorPieces
-    );
-
-  const items = [
-    [
-      "게임 단계",
-      `현재 ${phaseName}입니다.`
-    ],
-
-    [
-      "기물의 개수",
-      materialText(
-        snapshot.material
-      )
-    ],
-
-    [
-      "기물의 활동성",
-      bishopHtml
-    ],
-
-    [
-      "폰 구조",
-      "다음 단계에서 고립폰, 더블폰, 후방폰, 통과폰, 폰 브레이크 등을 분석합니다."
-    ],
-
-    [
-      "공간",
-      "다음 단계에서 각 진영의 실제 활동 공간과 상대 기물에 대한 제한을 분석합니다."
-    ],
-
-    [
-      "킹의 안전",
-      "다음 단계에서 킹 주변의 공격 가능성과 게임 단계에 따른 킹의 역할을 분석합니다."
-    ],
-
-    [
-      "현재의 생각",
-      buildInitialStrategyText(
-        snapshot
-      )
-    ]
-  ];
-
-  els.humanFactors.innerHTML =
-    items
-      .map(
-        ([title, text]) =>
-          `<div class="factor">
-            <strong>${title}</strong>
-            <div>${text}</div>
-          </div>`
-      )
-      .join("");
-}
-
-
-/* =========================================================
-   ENGINE RESULT
-   ========================================================= */
-
-function renderAnalysis(
-  result
-) {
-  const position =
-    positions[
-      currentPly
-    ];
-
-  const evaluation =
-    result.lines[0]?.score ??
-    null;
-
-  els.evalValue.textContent =
-    formatScore(
-      evaluation
-    );
-
-  els.positionInsight.textContent =
-    scoreLabel(
-      evaluation
-    );
-
-  els.depthValue.textContent =
-    result.depth || "—";
 
   els.progressBar.style.width =
-    "100%";
-
-  els.candidateList.innerHTML =
-    "";
-
-  const labels = [
-    "엔진 최선",
-    "전략 분석 대기",
-    "전략 분석 대기"
-  ];
-
-  result.lines
-    .slice(0, 3)
-    .forEach(
-      (line, index) => {
-        const san =
-          uciToSan(
-            position.fen,
-            line.pv[0] || ""
-          );
-
-        const description =
-          index === 0
-            ? "현재 단계에서는 엔진이 계산한 최선의 수를 표시합니다. 전략적 후보 분류는 이후 단계에서 추가합니다."
-            : "아직 전략 엔진의 후보 분류 단계가 구현되지 않았습니다.";
-
-        els.candidateList.insertAdjacentHTML(
-          "beforeend",
-          `<div class="candidate">
-            <strong>
-              ${index + 1}. ${san}
-            </strong>
-
-            <span>
-              ${labels[index]} ·
-              ${formatScore(
-                line.score
-              )}
-            </span>
-
-            <p>
-              ${description}
-            </p>
-          </div>`
-        );
-      }
-    );
-
-  const chess =
-    new Chess(
-      position.fen
-    );
-
-  const snapshot =
-    createPositionSnapshot(
-      chess
-    );
-
-  renderFactorsFromSnapshot(
-    snapshot
-  );
+    `${clamp(value, 0, 100)}%`;
 }
 
+function renderEvaluation(lines) {
+  if (!lines || lines.length === 0) {
+    els.evalValue.textContent = "—";
+    els.depthValue.textContent = "—";
+    return;
+  }
 
-/* =========================================================
-   SELECT PLY
-   ========================================================= */
-
-async function selectPly(
-  ply
-) {
-  currentPly =
-    Math.max(
-      0,
-      Math.min(
-        positions.length - 1,
-        ply
-      )
-    );
-
-  const position =
-    positions[
-      currentPly
-    ];
-
-  renderBoard(
-    position.fen
-  );
-
-  renderMoves();
-
-  els.moveLabel.textContent =
-    `${currentPly} / ${
-      positions.length - 1
-    }`;
-
-  els.positionLabel.textContent =
-    currentPly === 0
-      ? "시작 포지션"
-      : `${Math.ceil(
-          currentPly / 2
-        )}${
-          currentPly % 2
-            ? ". "
-            : "… "
-        }${position.san}`;
-
-  els.firstBtn.disabled =
-    currentPly === 0;
-
-  els.prevBtn.disabled =
-    currentPly === 0;
-
-  els.nextBtn.disabled =
-    currentPly ===
-    positions.length - 1;
-
-  els.lastBtn.disabled =
-    currentPly ===
-    positions.length - 1;
-
-  clearError();
-
-  renderProgress(
-    0,
-    0
-  );
+  const best = lines[0];
 
   els.evalValue.textContent =
-    "분석 중…";
+    formatEvaluation(best.score);
 
-  els.candidateList.innerHTML =
-    "";
+  els.depthValue.textContent =
+    best.depth
+      ? `d${best.depth}`
+      : "—";
+}
 
-  const snapshot =
-    createPositionSnapshot(
-      new Chess(
-        position.fen
-      )
+function evaluationLanguage(lines) {
+  if (!lines || !lines[0]) {
+    return "현재 포지션을 평가하고 있습니다.";
+  }
+
+  const score =
+    scoreToWhitePerspective(
+      lines[0].score
     );
 
-  renderFactorsFromSnapshot(
-    snapshot
-  );
-
-  try {
-    const result =
-      await analyzeFen(
-        position.fen,
-        10
-      );
-
-    if (
-      ply === currentPly
-    ) {
-      renderAnalysis(
-        result
-      );
-    }
-  } catch (error) {
-    if (
-      error.message !==
-        "이전 분석이 취소되었습니다." &&
-      ply === currentPly
-    ) {
-      showError(
-        error.message ||
-        "분석에 실패했습니다."
-      );
-    }
+  if (score === null) {
+    return "현재 포지션을 평가하고 있습니다.";
   }
+
+  const abs = Math.abs(score);
+
+  if (abs < 0.3) {
+    return "현재 포지션은 대체로 균형에 가깝습니다. 작은 차이보다 어떤 불균형을 활용할지가 중요합니다.";
+  }
+
+  if (abs < 1) {
+    return score > 0
+      ? "백이 약간 더 편안한 포지션입니다. 작은 우세를 어떻게 유지하고 키울지가 중요합니다."
+      : "흑이 약간 더 편안한 포지션입니다. 작은 우세를 어떻게 유지하고 키울지가 중요합니다.";
+  }
+
+  if (abs < 2) {
+    return score > 0
+      ? "백에게 분명한 우세가 있습니다. 우세의 원인이 무엇인지 확인하고 상대의 반격을 줄이는 것이 중요합니다."
+      : "흑에게 분명한 우세가 있습니다. 우세의 원인이 무엇인지 확인하고 상대의 반격을 줄이는 것이 중요합니다.";
+  }
+
+  if (abs < 4) {
+    return score > 0
+      ? "백이 상당한 우세를 가지고 있습니다. 가장 중요한 불균형을 활용하면서 상대의 반격을 허용하지 않는 것이 중요합니다."
+      : "흑이 상당한 우세를 가지고 있습니다. 가장 중요한 불균형을 활용하면서 상대의 반격을 허용하지 않는 것이 중요합니다.";
+  }
+
+  return score > 0
+    ? "백 쪽으로 평가가 크게 기울어 있습니다."
+    : "흑 쪽으로 평가가 크게 기울어 있습니다.";
 }
 
 
 /* =========================================================
-   START GAME
-   ========================================================= */
+   후보 수
+========================================================= */
 
-async function startGame() {
-  clearError();
+function pvToText(pv) {
+  if (!pv || pv.length === 0) {
+    return "—";
+  }
 
-  const text =
-    els.pgnInput.value.trim();
+  return pv
+    .slice(0, 5)
+    .join(" ");
+}
 
-  if (!text) {
-    showError(
-      "PGN을 입력해주세요."
-    );
+function renderCandidates(lines) {
+  els.candidateList.innerHTML = "";
+
+  if (!lines || lines.length === 0) {
+    els.candidateList.innerHTML =
+      `<div class="candidate">
+        <strong>분석 중</strong>
+        <span>엔진이 후보 수를 계산하고 있습니다.</span>
+      </div>`;
 
     return;
   }
 
-  const chess =
+  lines.slice(0, 3).forEach((line, index) => {
+    const item = document.createElement("div");
+
+    item.className = "candidate";
+
+    const title =
+      index === 0
+        ? "엔진 추천"
+        : `후보 ${index + 1}`;
+
+    const score =
+      formatEvaluation(line.score);
+
+    item.innerHTML = `
+      <div>
+        <strong>${title}</strong>
+        <span>${pvToText(line.pv)}</span>
+      </div>
+      <b>${score}</b>
+    `;
+
+    els.candidateList.appendChild(item);
+  });
+}
+
+
+/* =========================================================
+   사람의 관점
+========================================================= */
+
+function renderFactors(snapshot) {
+  const material = snapshot.material;
+  const minor = snapshot.minorPieces;
+
+  const items = [];
+
+  items.push({
+    title: "게임 단계",
+    text:
+      `현재 ${snapshot.phase}입니다.`
+  });
+
+  items.push({
+    title: "기물의 개수",
+    text:
+      material.text
+  });
+
+  /*
+    이번 단계의 핵심.
+  */
+  for (const color of ["w", "b"]) {
+    const bishops =
+      minor[color].bishops;
+
+    const knights =
+      minor[color].knights;
+
+    for (const bishop of bishops) {
+      items.push({
+        title:
+          `${colorName(color)} ${bishop.square} · ${bishop.label}`,
+        text:
+          `${bishop.explanation} ${bishop.improvement}`
+      });
+    }
+
+    for (const knight of knights) {
+      items.push({
+        title:
+          `${colorName(color)} ${knight.square} · ${knight.label}`,
+        text:
+          `${knight.explanation} ${knight.improvement}`
+      });
+    }
+  }
+
+  /*
+    아직 구현하지 않은 항목은
+    분석 완료라고 거짓말하지 않는다.
+  */
+  items.push({
+    title: "폰 구조",
+    text:
+      "다음 단계에서 폰의 약점과 강점, 고립폰·더블폰·패스드폰 등을 분석합니다."
+  });
+
+  items.push({
+    title: "공간",
+    text:
+      "다음 단계에서 어느 쪽이 더 많은 공간을 가지고 있는지와 그 공간이 실제로 어떤 의미를 가지는지 분석합니다."
+  });
+
+  items.push({
+    title: "킹의 안전",
+    text:
+      "다음 단계에서 킹 주변의 안전성과 공격 가능성을 별도로 분석합니다."
+  });
+
+  if (minor.dominantSide) {
+    items.push({
+      title: "현재의 생각",
+      text:
+        minor.summary
+    });
+  } else {
+    items.push({
+      title: "현재의 생각",
+      text:
+        "현재 기물의 활동성만 놓고 보면 한쪽이 압도적으로 유리하다고 보기는 어렵습니다. 폰 구조와 공간을 함께 봐야 어느 불균형이 더 중요한지 판단할 수 있습니다."
+    });
+  }
+
+  els.humanFactors.innerHTML = "";
+
+  for (const item of items) {
+    const factor = document.createElement("div");
+
+    factor.className = "factor";
+
+    factor.innerHTML = `
+      <strong>${item.title}</strong>
+      <p>${item.text}</p>
+    `;
+
+    els.humanFactors.appendChild(factor);
+  }
+}
+
+
+/* =========================================================
+   현재 포지션 분석
+========================================================= */
+
+async function analyzeCurrentPosition() {
+  if (!positions[currentPly]) {
+    return;
+  }
+
+  const position = positions[currentPly];
+
+  const chess = new Chess(position.fen);
+
+  currentSnapshot =
+    createPositionSnapshot(
+      chess,
+      currentPly
+    );
+
+  renderBoard(position.fen);
+
+  els.moveLabel.textContent =
+    `${currentPly} / ${totalPlies}`;
+
+  if (currentPly === 0) {
+    els.positionLabel.textContent =
+      "시작 포지션";
+  } else {
+    const moveNumber =
+      Math.ceil(currentPly / 2);
+
+    const side =
+      currentPly % 2 === 1
+        ? "백"
+        : "흑";
+
+    els.positionLabel.textContent =
+      `${moveNumber}. ${side}의 수 이후`;
+  }
+
+  renderFactors(currentSnapshot);
+
+  els.positionInsight.textContent =
+    evaluationLanguage([]);
+
+  setProgress(10);
+
+  const lines =
+    await analyzeWithEngine(
+      position.fen,
+      12
+    );
+
+  renderEvaluation(lines);
+  renderCandidates(lines);
+
+  els.positionInsight.textContent =
+    evaluationLanguage(lines);
+
+  setProgress(100);
+}
+
+
+/* =========================================================
+   PGN 분석
+========================================================= */
+
+function showError(message) {
+  els.errorBox.hidden = false;
+  els.errorBox.textContent = message;
+}
+
+function clearError() {
+  els.errorBox.hidden = true;
+  els.errorBox.textContent = "";
+}
+
+function analyzePGN() {
+  clearError();
+
+  const pgn =
+    els.pgnInput.value.trim();
+
+  if (!pgn) {
+    showError("PGN을 입력해주세요.");
+    return;
+  }
+
+  const parsed =
     new Chess();
 
   try {
-    chess.loadPgn(
-      text,
-      {
-        strict: false
-      }
-    );
-  } catch {
+    parsed.loadPgn(pgn);
+  } catch (error) {
+    console.error(error);
     showError(
-      "PGN을 읽을 수 없습니다. 수순 형식과 PGN 태그를 확인해주세요."
+      "PGN을 읽지 못했습니다. 수순이나 PGN 형식을 확인해주세요."
     );
-
     return;
   }
 
+  game = parsed;
+
   positions =
-    buildPositions(
-      chess
-    );
+    buildPositions(game);
 
-  currentPly =
-    0;
+  totalPlies =
+    positions.length - 1;
 
-  analysisCache.clear();
+  currentPly = 0;
 
-  els.inputView.hidden =
-    true;
-
-  els.analysisView.hidden =
-    false;
+  els.inputView.hidden = true;
+  els.analysisView.hidden = false;
 
   els.gameMeta.textContent =
-    `${positions.length - 1}수`;
+    `${totalPlies}수`;
 
-  renderMoves();
+  renderMoveList();
 
-  await initEngine();
+  setProgress(5);
 
-  await selectPly(0);
+  analyzeCurrentPosition();
 }
 
 
 /* =========================================================
-   BUTTONS
-   ========================================================= */
+   이동
+========================================================= */
 
-els.exampleBtn.onclick =
-  () => {
-    els.pgnInput.value =
-      EXAMPLE;
-
-    clearError();
-  };
-
-els.analyzeBtn.onclick =
-  async () => {
-    els.analyzeBtn.disabled =
-      true;
-
-    try {
-      await startGame();
-    } finally {
-      els.analyzeBtn.disabled =
-        false;
-    }
-  };
-
-els.backBtn.onclick =
-  () => {
-    cancelCurrentAnalysis();
-
-    els.analysisView.hidden =
-      true;
-
-    els.inputView.hidden =
-      false;
-  };
-
-els.firstBtn.onclick =
-  () =>
-    selectPly(0);
-
-els.prevBtn.onclick =
-  () =>
-    selectPly(
-      currentPly - 1
+function goToPly(ply) {
+  const next =
+    clamp(
+      ply,
+      0,
+      totalPlies
     );
 
-els.nextBtn.onclick =
-  () =>
-    selectPly(
-      currentPly + 1
-    );
+  currentPly = next;
 
-els.lastBtn.onclick =
-  () =>
-    selectPly(
-      positions.length - 1
-    );
+  analyzeCurrentPosition();
+}
+
+function goFirst() {
+  goToPly(0);
+}
+
+function goPrevious() {
+  goToPly(currentPly - 1);
+}
+
+function goNext() {
+  goToPly(currentPly + 1);
+}
+
+function goLast() {
+  goToPly(totalPlies);
+}
 
 
 /* =========================================================
-   START
-   ========================================================= */
+   이벤트
+========================================================= */
 
-initEngine().catch(
-  () => {}
+els.exampleBtn.addEventListener(
+  "click",
+  () => {
+    els.pgnInput.value =
+      EXAMPLE_PGN;
+    clearError();
+  }
 );
+
+els.analyzeBtn.addEventListener(
+  "click",
+  analyzePGN
+);
+
+els.firstBtn.addEventListener(
+  "click",
+  goFirst
+);
+
+els.prevBtn.addEventListener(
+  "click",
+  goPrevious
+);
+
+els.nextBtn.addEventListener(
+  "click",
+  goNext
+);
+
+els.lastBtn.addEventListener(
+  "click",
+  goLast
+);
+
+els.backBtn.addEventListener(
+  "click",
+  () => {
+    els.analysisView.hidden = true;
+    els.inputView.hidden = false;
+    clearError();
+  }
+);
+
+
+/* =========================================================
+   시작
+========================================================= */
+
+setEngineStatus(
+  "엔진 준비 중…",
+  "loading"
+);
+
+initEngine();
