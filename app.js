@@ -3808,7 +3808,7 @@ async function analyzeCurrent() {
     result =
       await analyzeFen(
         position.fen,
-        8
+        7
       );
   } catch (error) {
     if (
