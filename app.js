@@ -72,13 +72,13 @@ const PIECES = {
 let worker = null;
 let engineReady = false;
 let enginePromise = null;
-let job = null;
+let activeJob = null;
 
 let positions = [];
 let ply = 0;
-let generation = 0;
-let cache = new Map();
 let game = null;
+
+const cache = new Map();
 
 
 /* =========================================================
@@ -142,7 +142,7 @@ function escape(text) {
 
 
 /* =========================================================
-   Stockfish
+   Stockfish 점수
 ========================================================= */
 
 function parseScore(tokens) {
@@ -181,7 +181,10 @@ function whiteScore(score, turn) {
     ) / 100;
   }
 
-  const sign = score.value >= 0 ? 1 : -1;
+  const sign =
+    score.value >= 0
+      ? 1
+      : -1;
 
   return (
     turn === "w"
@@ -196,14 +199,21 @@ function scoreText(value) {
   }
 
   if (Math.abs(value) >= 99) {
-    return value > 0 ? "+M" : "−M";
+    return value > 0
+      ? "+M"
+      : "−M";
   }
 
   return `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(2)}`;
 }
 
 function scoreWords(value) {
-  const abs = Math.abs(value || 0);
+  if (value == null) {
+    return "포지션을 분석하고 있습니다.";
+  }
+
+  const abs =
+    Math.abs(value);
 
   if (abs < 0.2) {
     return "대체로 균형에 가까운 포지션입니다.";
@@ -211,8 +221,8 @@ function scoreWords(value) {
 
   if (abs < 0.8) {
     return value > 0
-      ? "백이 약간 더 편안합니다."
-      : "흑이 약간 더 편안합니다.";
+      ? "백이 약간 더 편안한 포지션입니다."
+      : "흑이 약간 더 편안한 포지션입니다.";
   }
 
   if (abs < 1.8) {
@@ -232,141 +242,205 @@ function scoreWords(value) {
     : "흑 쪽으로 평가가 크게 기울어 있습니다.";
 }
 
-function stopJob() {
-  if (job) {
-    clearTimeout(job.timer);
 
-    if (job.reject) {
-      job.reject(new Error("cancelled"));
-    }
+/* =========================================================
+   엔진 작업 취소
+========================================================= */
 
-    job = null;
+function cancelEngineJob() {
+  if (!activeJob) {
+    return;
   }
+
+  const current =
+    activeJob;
+
+  activeJob = null;
+
+  clearTimeout(current.timer);
 
   try {
     worker?.postMessage("stop");
   } catch {}
+
+  current.reject(
+    new Error("cancelled")
+  );
 }
+
+
+/* =========================================================
+   Stockfish 시작
+========================================================= */
 
 function bootEngine() {
   if (enginePromise) {
     return enginePromise;
   }
 
-  enginePromise = new Promise((resolve, reject) => {
-    setStatus("Stockfish 로딩 중…");
+  enginePromise = new Promise(
+    (resolve, reject) => {
+      setStatus("Stockfish 로딩 중…");
 
-    try {
-      worker = new Worker(ENGINE);
-    } catch (error) {
-      reject(error);
-      return;
+      try {
+        worker =
+          new Worker(
+            ENGINE
+          );
+      } catch (error) {
+        reject(error);
+        return;
+      }
+
+      let uciReady = false;
+
+      const timeout =
+        setTimeout(() => {
+          if (!engineReady) {
+            try {
+              worker.terminate();
+            } catch {}
+
+            worker = null;
+            enginePromise = null;
+
+            setStatus(
+              "엔진 로딩 실패",
+              "error"
+            );
+
+            reject(
+              new Error(
+                "Stockfish 로딩 시간이 초과되었습니다."
+              )
+            );
+          }
+        }, 20000);
+
+      worker.onerror =
+        event => {
+          clearTimeout(timeout);
+
+          engineReady = false;
+          worker = null;
+          enginePromise = null;
+
+          setStatus(
+            "엔진 오류",
+            "error"
+          );
+
+          reject(
+            new Error(
+              event?.message ||
+              "Stockfish 오류"
+            )
+          );
+        };
+
+      worker.onmessage =
+        event => {
+          const line =
+            String(
+              event.data || ""
+            ).trim();
+
+          if (!line) {
+            return;
+          }
+
+          /*
+           * UCI 시작
+           */
+          if (
+            line === "uciok" &&
+            !uciReady
+          ) {
+            uciReady = true;
+
+            worker.postMessage(
+              "setoption name MultiPV value 3"
+            );
+
+            worker.postMessage(
+              "setoption name Threads value 1"
+            );
+
+            worker.postMessage(
+              "setoption name Hash value 16"
+            );
+
+            worker.postMessage(
+              "isready"
+            );
+
+            return;
+          }
+
+          /*
+           * 엔진 준비 완료
+           */
+          if (
+            line === "readyok" &&
+            uciReady
+          ) {
+            clearTimeout(timeout);
+
+            engineReady = true;
+
+            setStatus(
+              "Stockfish 준비 완료",
+              "ready"
+            );
+
+            resolve();
+
+            return;
+          }
+
+          /*
+           * 현재 분석 작업에 전달
+           */
+          if (activeJob) {
+            activeJob.handle(line);
+          }
+        };
+
+      worker.postMessage("uci");
     }
+  );
 
-    let readyPhase = false;
-
-    const timer = setTimeout(() => {
-      if (!engineReady) {
-        try {
-          worker.terminate();
-        } catch {}
-
-        enginePromise = null;
-
-        reject(
-          new Error(
-            "Stockfish 로딩 시간이 초과되었습니다."
-          )
-        );
-      }
-    }, 30000);
-
-    worker.onerror = event => {
-      clearTimeout(timer);
-
+  return enginePromise.catch(
+    error => {
       engineReady = false;
-      enginePromise = null;
-
-      setStatus("엔진 오류", "error");
-
-      reject(
-        new Error(
-          event?.message || "Stockfish 오류"
-        )
+      setStatus(
+        "엔진 오류",
+        "error"
       );
-    };
-
-    worker.onmessage = event => {
-      const line = String(event.data || "").trim();
-
-      if (!line) {
-        return;
-      }
-
-      if (
-        line === "uciok" &&
-        !readyPhase
-      ) {
-        readyPhase = true;
-
-        worker.postMessage(
-          "setoption name MultiPV value 3"
-        );
-
-        worker.postMessage(
-          "setoption name Threads value 1"
-        );
-
-        worker.postMessage(
-          "setoption name Hash value 32"
-        );
-
-        worker.postMessage("isready");
-
-        return;
-      }
-
-      if (
-        line === "readyok" &&
-        readyPhase
-      ) {
-        clearTimeout(timer);
-
-        engineReady = true;
-
-        setStatus(
-          "Stockfish 준비 완료",
-          "ready"
-        );
-
-        resolve();
-
-        return;
-      }
-
-      if (job) {
-        job.line(line);
-      }
-    };
-
-    worker.postMessage("uci");
-  }).catch(error => {
-    engineReady = false;
-    setStatus("엔진 오류", "error");
-    throw error;
-  });
-
-  return enginePromise;
+      throw error;
+    }
+  );
 }
 
-function analyzeFen(fen, depth = 10) {
-  const key = `${fen}|${depth}`;
+
+/* =========================================================
+   Stockfish 분석
+========================================================= */
+
+function analyzeFen(
+  fen,
+  depth = 8
+) {
+  const key =
+    `${fen}|${depth}`;
 
   if (cache.has(key)) {
-    return Promise.resolve(cache.get(key));
+    return Promise.resolve(
+      cache.get(key)
+    );
   }
 
-  if (!engineReady) {
+  if (!engineReady || !worker) {
     return Promise.reject(
       new Error(
         "Stockfish가 아직 준비되지 않았습니다."
@@ -374,162 +448,268 @@ function analyzeFen(fen, depth = 10) {
     );
   }
 
-  stopJob();
+  /*
+   * 이전 작업이 있다면 취소한다.
+   */
+  if (activeJob) {
+    cancelEngineJob();
+  }
 
-  return new Promise((resolve, reject) => {
-    const turn = fen.split(" ")[1];
+  return new Promise(
+    (resolve, reject) => {
+      const turn =
+        fen.split(" ")[1];
 
-    const result = {
-      fen,
-      turn,
-      depth: 0,
-      lines: []
-    };
+      const lines =
+        new Map();
 
-    const byPv = new Map();
-    const token = ++generation;
+      let maxDepth = 0;
 
-    const timer = setTimeout(() => {
-      if (job?.token !== token) {
-        return;
-      }
+      const timeout =
+        setTimeout(() => {
+          if (
+            activeJob === job
+          ) {
+            activeJob = null;
 
-      job = null;
+            try {
+              worker.postMessage(
+                "stop"
+              );
+            } catch {}
+
+            reject(
+              new Error(
+                "엔진 분석 시간이 초과되었습니다."
+              )
+            );
+          }
+        }, 12000);
+
+      const job = {
+        timer: timeout,
+
+        reject,
+
+        handle(line) {
+          /*
+           * info pv
+           */
+          if (
+            line.startsWith("info ") &&
+            line.includes(" pv ")
+          ) {
+            const tokens =
+              line.split(/\s+/);
+
+            const depthIndex =
+              tokens.indexOf(
+                "depth"
+              );
+
+            const multiPvIndex =
+              tokens.indexOf(
+                "multipv"
+              );
+
+            const score =
+              whiteScore(
+                parseScore(tokens),
+                turn
+              );
+
+            const pvIndex =
+              tokens.indexOf("pv");
+
+            const currentDepth =
+              depthIndex >= 0
+                ? Number(
+                    tokens[
+                      depthIndex + 1
+                    ]
+                  )
+                : 0;
+
+            const multiPv =
+              multiPvIndex >= 0
+                ? Number(
+                    tokens[
+                      multiPvIndex + 1
+                    ]
+                  )
+                : 1;
+
+            const pv =
+              pvIndex >= 0
+                ? tokens.slice(
+                    pvIndex + 1
+                  )
+                : [];
+
+            if (
+              currentDepth > maxDepth
+            ) {
+              maxDepth =
+                currentDepth;
+
+              setProgress(
+                Math.min(
+                  95,
+                  currentDepth /
+                    depth *
+                    100
+                ),
+                currentDepth
+              );
+            }
+
+            if (
+              currentDepth > 0 &&
+              score != null &&
+              pv.length
+            ) {
+              const previous =
+                lines.get(
+                  multiPv
+                );
+
+              /*
+               * 같은 MultiPV에서는
+               * 가장 깊은 결과만 유지한다.
+               */
+              if (
+                !previous ||
+                currentDepth >=
+                  previous.depth
+              ) {
+                lines.set(
+                  multiPv,
+                  {
+                    score,
+                    pv,
+                    depth:
+                      currentDepth
+                  }
+                );
+              }
+            }
+
+            return;
+          }
+
+          /*
+           * bestmove
+           */
+          if (
+            line.startsWith(
+              "bestmove"
+            )
+          ) {
+            clearTimeout(
+              timeout
+            );
+
+            if (
+              activeJob !== job
+            ) {
+              return;
+            }
+
+            activeJob = null;
+
+            const result = {
+              fen,
+              turn,
+              depth: maxDepth,
+              lines:
+                [...lines.entries()]
+                  .sort(
+                    (a, b) =>
+                      a[0] - b[0]
+                  )
+                  .map(
+                    ([, value]) =>
+                      value
+                  )
+            };
+
+            cache.set(
+              key,
+              result
+            );
+
+            setProgress(
+              100,
+              maxDepth
+            );
+
+            resolve(result);
+          }
+        }
+      };
+
+      activeJob = job;
 
       try {
-        worker.postMessage("stop");
-      } catch {}
+        worker.postMessage(
+          `position fen ${fen}`
+        );
 
-      reject(
-        new Error(
-          "엔진 분석 시간이 초과되었습니다."
-        )
-      );
-    }, 30000);
-
-    job = {
-      token,
-      timer,
-      reject,
-
-      line(line) {
-        const tokens = line.split(/\s+/);
+        worker.postMessage(
+          `go depth ${depth}`
+        );
+      } catch (error) {
+        clearTimeout(timeout);
 
         if (
-          line.startsWith("info ") &&
-          line.includes(" pv ")
+          activeJob === job
         ) {
-          const depthIndex =
-            tokens.indexOf("depth");
-
-          const multiPvIndex =
-            tokens.indexOf("multipv");
-
-          const pvIndex =
-            tokens.indexOf("pv");
-
-          const currentDepth =
-            depthIndex >= 0
-              ? Number(tokens[depthIndex + 1])
-              : 0;
-
-          const multiPv =
-            multiPvIndex >= 0
-              ? Number(tokens[multiPvIndex + 1])
-              : 1;
-
-          const score =
-            whiteScore(
-              parseScore(tokens),
-              turn
-            );
-
-          const pv =
-            pvIndex >= 0
-              ? tokens.slice(pvIndex + 1)
-              : [];
-
-          if (
-            currentDepth &&
-            score != null &&
-            pv.length
-          ) {
-            byPv.set(
-              multiPv,
-              {
-                score,
-                pv,
-                depth: currentDepth
-              }
-            );
-          }
-
-          result.depth =
-            Math.max(
-              result.depth,
-              currentDepth
-            );
-
-          if (currentDepth) {
-            setProgress(
-              Math.min(
-                96,
-                currentDepth / depth * 100
-              ),
-              currentDepth
-            );
-          }
+          activeJob = null;
         }
 
-        if (line.startsWith("bestmove")) {
-          clearTimeout(timer);
-
-          job = null;
-
-          result.lines =
-            [...byPv.entries()]
-              .sort((a, b) => a[0] - b[0])
-              .map(entry => entry[1]);
-
-          cache.set(key, result);
-
-          resolve(result);
-        }
+        reject(error);
       }
-    };
-
-    worker.postMessage(
-      `position fen ${fen}`
-    );
-
-    worker.postMessage(
-      `go depth ${depth}`
-    );
-  });
+    }
+  );
 }
 
 
 /* =========================================================
-   UCI / SAN
+   UCI → SAN
 ========================================================= */
 
-function sanPv(fen, pv) {
-  const chess = new Chess(fen);
+function sanPv(
+  fen,
+  pv
+) {
+  const chess =
+    new Chess(fen);
+
   const output = [];
 
-  for (const uci of pv) {
+  for (
+    const uci of pv || []
+  ) {
     try {
-      const move = chess.move({
-        from: uci.slice(0, 2),
-        to: uci.slice(2, 4),
-        promotion: uci[4]
-      });
+      const move =
+        chess.move({
+          from:
+            uci.slice(0, 2),
+
+          to:
+            uci.slice(2, 4),
+
+          promotion:
+            uci[4]
+        });
 
       if (!move) {
         break;
       }
 
-      output.push(move.san);
+      output.push(
+        move.san
+      );
     } catch {
       break;
     }
@@ -538,27 +718,37 @@ function sanPv(fen, pv) {
   return output.join(" ");
 }
 
-function firstUci(line) {
-  return line?.pv?.[0] || "";
-}
-
-function applyUci(fen, uci) {
+function applyUci(
+  fen,
+  uci
+) {
   try {
-    const chess = new Chess(fen);
+    const chess =
+      new Chess(fen);
 
-    const move = chess.move({
-      from: uci.slice(0, 2),
-      to: uci.slice(2, 4),
-      promotion: uci[4]
-    });
+    const move =
+      chess.move({
+        from:
+          uci.slice(0, 2),
+
+        to:
+          uci.slice(2, 4),
+
+        promotion:
+          uci[4]
+      });
 
     if (!move) {
       return null;
     }
 
     return {
-      fen: chess.fen(),
-      san: move.san(),
+      fen:
+        chess.fen(),
+
+      san:
+        move.san(),
+
       move
     };
   } catch {
@@ -572,7 +762,8 @@ function applyUci(fen, uci) {
 ========================================================= */
 
 function loadGame(text) {
-  const chess = new Chess();
+  const chess =
+    new Chess();
 
   chess.loadPgn(
     text,
@@ -585,12 +776,15 @@ function loadGame(text) {
 }
 
 function buildPositions(chess) {
-  const board = new Chess();
+  const board =
+    new Chess();
 
   const output = [
     {
       ply: 0,
-      fen: board.fen(),
+      fen:
+        board.fen(),
+
       san: null,
       uci: null
     }
@@ -602,12 +796,20 @@ function buildPositions(chess) {
     })
   ) {
     const actual =
-      board.move(move.san);
+      board.move(
+        move.san
+      );
 
     output.push({
-      ply: output.length,
-      fen: board.fen(),
-      san: actual.san,
+      ply:
+        output.length,
+
+      fen:
+        board.fen(),
+
+      san:
+        actual.san,
+
       uci:
         `${actual.from}${actual.to}${actual.promotion || ""}`
     });
@@ -618,22 +820,37 @@ function buildPositions(chess) {
 
 
 /* =========================================================
-   체스판 / 수순
+   체스판
 ========================================================= */
 
 function renderBoard(fen) {
-  const chess = new Chess(fen);
+  const chess =
+    new Chess(fen);
 
-  E.board.innerHTML = "";
+  E.board.innerHTML =
+    "";
 
-  for (let rank = 8; rank >= 1; rank--) {
-    for (let file = 0; file < 8; file++) {
+  for (
+    let rank = 8;
+    rank >= 1;
+    rank--
+  ) {
+    for (
+      let file = 0;
+      file < 8;
+      file++
+    ) {
       const element =
-        document.createElement("div");
+        document.createElement(
+          "div"
+        );
 
       const piece =
         chess.get(
-          square(file, rank)
+          square(
+            file,
+            rank
+          )
         );
 
       element.className =
@@ -652,46 +869,61 @@ function renderBoard(fen) {
           ];
       }
 
-      E.board.appendChild(element);
+      E.board.appendChild(
+        element
+      );
     }
   }
 }
 
 function renderMoves() {
-  E.moves.innerHTML = "";
+  E.moves.innerHTML =
+    "";
 
   positions
     .slice(1)
-    .forEach((position, index) => {
-      const number = index + 1;
+    .forEach(
+      (position, index) => {
+        const number =
+          index + 1;
 
-      const button =
-        document.createElement("button");
+        const button =
+          document.createElement(
+            "button"
+          );
 
-      button.className =
-        `moveItem ${
-          number === ply
-            ? "active"
-            : ""
-        }`;
+        button.className =
+          `moveItem ${
+            number === ply
+              ? "active"
+              : ""
+          }`;
 
-      button.textContent =
-        `${Math.ceil(number / 2)}${
-          number % 2
-            ? "."
-            : "…"
-        } ${position.san}`;
+        button.textContent =
+          `${Math.ceil(
+            number / 2
+          )}${
+            number % 2
+              ? "."
+              : "…"
+          } ${position.san}`;
 
-      button.onclick =
-        () => selectPly(number);
+        button.onclick =
+          () =>
+            selectPly(
+              number
+            );
 
-      E.moves.appendChild(button);
-    });
+        E.moves.appendChild(
+          button
+        );
+      }
+    );
 }
 
 
 /* =========================================================
-   기물 / 기본 위치 정보
+   기물
 ========================================================= */
 
 function allPieces(
@@ -712,7 +944,10 @@ function allPieces(
       file++
     ) {
       const name =
-        square(file, rank);
+        square(
+          file,
+          rank
+        );
 
       const piece =
         chess.get(name);
@@ -720,7 +955,8 @@ function allPieces(
       if (
         piece &&
         piece.color === color &&
-        (!type || piece.type === type)
+        (!type ||
+          piece.type === type)
       ) {
         output.push({
           square: name,
@@ -768,7 +1004,8 @@ function material(chess) {
           chess,
           color,
           type
-        ) * VALUE[type];
+        ) *
+        VALUE[type];
     }
   }
 
@@ -776,13 +1013,16 @@ function material(chess) {
     w: result.w,
     b: result.b,
     diff:
-      +(result.w - result.b).toFixed(1)
+      +(
+        result.w -
+        result.b
+      ).toFixed(1)
   };
 }
 
 
 /* =========================================================
-   공격 / 방어
+   공격
 ========================================================= */
 
 function attacks(
@@ -848,7 +1088,8 @@ function attacks(
   }
 
   const diagonal =
-    Math.abs(df) === Math.abs(dr);
+    Math.abs(df) ===
+    Math.abs(dr);
 
   const straight =
     df === 0 ||
@@ -872,10 +1113,12 @@ function attacks(
   }
 
   let file =
-    fromFile + Math.sign(df);
+    fromFile +
+    Math.sign(df);
 
   let rank =
-    fromRank + Math.sign(dr);
+    fromRank +
+    Math.sign(dr);
 
   while (
     file !== toFile ||
@@ -883,14 +1126,20 @@ function attacks(
   ) {
     if (
       chess.get(
-        square(file, rank)
+        square(
+          file,
+          rank
+        )
       )
     ) {
       return false;
     }
 
-    file += Math.sign(df);
-    rank += Math.sign(dr);
+    file +=
+      Math.sign(df);
+
+    rank +=
+      Math.sign(dr);
   }
 
   return true;
@@ -944,9 +1193,12 @@ function legalFrom(
 ) {
   try {
     const fields =
-      chess.fen().split(" ");
+      chess
+        .fen()
+        .split(" ");
 
-    fields[1] = color;
+    fields[1] =
+      color;
 
     const copy =
       new Chess(
@@ -972,14 +1224,38 @@ function phase(chess) {
     chess.history().length;
 
   const queens =
-    count(chess, "w", "q") +
-    count(chess, "b", "q");
+    count(
+      chess,
+      "w",
+      "q"
+    ) +
+    count(
+      chess,
+      "b",
+      "q"
+    );
 
   const minor =
-    count(chess, "w", "n") +
-    count(chess, "b", "n") +
-    count(chess, "w", "b") +
-    count(chess, "b", "b");
+    count(
+      chess,
+      "w",
+      "n"
+    ) +
+    count(
+      chess,
+      "b",
+      "n"
+    ) +
+    count(
+      chess,
+      "w",
+      "b"
+    ) +
+    count(
+      chess,
+      "b",
+      "b"
+    );
 
   if (
     queens === 0 ||
@@ -1016,7 +1292,9 @@ function pawnInfo(
 
   const files = {};
 
-  for (const pawn of pawns) {
+  for (
+    const pawn of pawns
+  ) {
     const file =
       pawn.square[0];
 
@@ -1057,13 +1335,17 @@ function pawnInfo(
         FILES[index + 1]
       ]
     ) {
-      isolated.push(...list);
+      isolated.push(
+        ...list
+      );
     }
   }
 
   const passed = [];
 
-  for (const pawn of pawns) {
+  for (
+    const pawn of pawns
+  ) {
     const file =
       FILES.indexOf(
         pawn.square[0]
@@ -1077,7 +1359,8 @@ function pawnInfo(
     const enemy =
       other(color);
 
-    let blocked = false;
+    let blocked =
+      false;
 
     for (
       const enemyFile
@@ -1119,7 +1402,8 @@ function pawnInfo(
             ? enemyRank > rank
             : enemyRank < rank
         ) {
-          blocked = true;
+          blocked =
+            true;
           break;
         }
       }
@@ -1136,9 +1420,16 @@ function pawnInfo(
     }
   }
 
+  /*
+   * 후방폰은 매우 보수적으로 판단한다.
+   * 단순히 "옆에 폰이 없다"는 이유만으로
+   * 후방폰이라고 부르지 않는다.
+   */
   const backward = [];
 
-  for (const pawn of pawns) {
+  for (
+    const pawn of pawns
+  ) {
     const file =
       FILES.indexOf(
         pawn.square[0]
@@ -1149,35 +1440,85 @@ function pawnInfo(
         pawn.square[1]
       );
 
-    const neighbors =
-      pawns.some(otherPawn => {
-        const otherFile =
-          FILES.indexOf(
-            otherPawn.square[0]
-          );
+    const adjacentSupport =
+      pawns.some(
+        otherPawn => {
+          const otherFile =
+            FILES.indexOf(
+              otherPawn.square[0]
+            );
 
-        const otherRank =
-          Number(
-            otherPawn.square[1]
-          );
+          const otherRank =
+            Number(
+              otherPawn.square[1]
+            );
 
-        return (
-          Math.abs(
-            otherFile - file
-          ) === 1 &&
-          (
-            color === "w"
-              ? otherRank >= rank
-              : otherRank <= rank
-          )
-        );
-      });
+          return (
+            Math.abs(
+              otherFile -
+              file
+            ) === 1 &&
+            (
+              color === "w"
+                ? otherRank >= rank
+                : otherRank <= rank
+            )
+          );
+        }
+      );
+
+    if (adjacentSupport) {
+      continue;
+    }
+
+    const forwardRank =
+      color === "w"
+        ? rank + 1
+        : rank - 1;
 
     if (
-      !neighbors &&
-      rank >= 3 &&
-      rank <= 6
+      forwardRank < 1 ||
+      forwardRank > 8
     ) {
+      continue;
+    }
+
+    const forwardSquare =
+      square(
+        file,
+        forwardRank
+      );
+
+    if (
+      chess.get(
+        forwardSquare
+      )
+    ) {
+      continue;
+    }
+
+    const enemy =
+      other(color);
+
+    /*
+     * 실제로 전진 칸 또는 그 주변이
+     * 상대 폰에게 압박받는 경우만 후보로 본다.
+     */
+    const enemyPawn =
+      allPieces(
+        chess,
+        enemy,
+        "p"
+      ).some(
+        enemyPiece =>
+          attacks(
+            chess,
+            enemyPiece.square,
+            forwardSquare
+          )
+      );
+
+    if (enemyPawn) {
       backward.push(
         pawn.square
       );
@@ -1218,8 +1559,14 @@ function space(
 
     score +=
       color === "w"
-        ? Math.max(0, rank - 2)
-        : Math.max(0, 7 - rank);
+        ? Math.max(
+            0,
+            rank - 2
+          )
+        : Math.max(
+            0,
+            7 - rank
+          );
   }
 
   return score;
@@ -1234,8 +1581,7 @@ function openFiles(chess) {
   const output = [];
 
   for (
-    const file
-    of FILES
+    const file of FILES
   ) {
     const whitePawn =
       allPieces(
@@ -1244,7 +1590,8 @@ function openFiles(chess) {
         "p"
       ).some(
         piece =>
-          piece.square[0] === file
+          piece.square[0] ===
+          file
       );
 
     const blackPawn =
@@ -1254,7 +1601,8 @@ function openFiles(chess) {
         "p"
       ).some(
         piece =>
-          piece.square[0] === file
+          piece.square[0] ===
+          file
       );
 
     if (
@@ -1299,40 +1647,45 @@ function bishopData(
     );
 
   const useful =
-    moves.filter(move => {
-      const target =
-        chess.get(
+    moves.filter(
+      move => {
+        const target =
+          chess.get(
+            move.to
+          );
+
+        /*
+         * 상대 기물을 잡을 수 있으면
+         * 당연히 구체적인 선택지다.
+         */
+        if (
+          target &&
+          target.color === enemy
+        ) {
+          return true;
+        }
+
+        /*
+         * 중앙 및 전진 대각선.
+         */
+        return [
+          "c4",
+          "c5",
+          "d4",
+          "d5",
+          "e4",
+          "e5",
+          "f4",
+          "f5",
+          "g2",
+          "g7",
+          "b2",
+          "b7"
+        ].includes(
           move.to
         );
-
-      if (
-        target &&
-        target.color === enemy
-      ) {
-        return true;
       }
-
-      if (
-        defenders(
-          chess,
-          move.to,
-          piece.piece.color
-        ).length
-      ) {
-        return true;
-      }
-
-      return [
-        "c4",
-        "c5",
-        "d4",
-        "d5",
-        "e4",
-        "e5",
-        "f4",
-        "f5"
-      ].includes(move.to);
-    });
+    );
 
   return {
     moves,
@@ -1342,7 +1695,7 @@ function bishopData(
 
 
 /* =========================================================
-   나이트 / 아웃포스트
+   나이트
 ========================================================= */
 
 function knightData(
@@ -1362,9 +1715,11 @@ function knightData(
     const move of moves
   ) {
     const [
-      file,
+      ,
       rank
-    ] = xy(move.to);
+    ] = xy(
+      move.to
+    );
 
     const advanced =
       piece.piece.color === "w"
@@ -1375,16 +1730,30 @@ function knightData(
       continue;
     }
 
-    const enemyAttacks =
-      attacked(
-        chess,
-        move.to,
-        other(
-          piece.piece.color
-        )
+    /*
+     * 상대 폰에게 공격받지 않는지를
+     * 우선 본다.
+     */
+    const enemy =
+      other(
+        piece.piece.color
       );
 
-    if (enemyAttacks) {
+    const enemyPawnAttack =
+      allPieces(
+        chess,
+        enemy,
+        "p"
+      ).some(
+        pawn =>
+          attacks(
+            chess,
+            pawn.square,
+            move.to
+          )
+      );
+
+    if (enemyPawnAttack) {
       continue;
     }
 
@@ -1395,9 +1764,12 @@ function knightData(
         piece.piece.color
       );
 
-    if (support.length) {
+    if (
+      support.length
+    ) {
       outposts.push({
-        square: move.to,
+        square:
+          move.to,
         support
       });
     }
@@ -1411,7 +1783,7 @@ function knightData(
 
 
 /* =========================================================
-   킹 안전
+   킹 압박
 ========================================================= */
 
 function kingPressure(
@@ -1500,29 +1872,41 @@ function development(
 ) {
   const home =
     color === "w"
-      ? ["b1", "g1", "c1", "f1"]
-      : ["b8", "g8", "c8", "f8"];
+      ? [
+          "b1",
+          "g1",
+          "c1",
+          "f1"
+        ]
+      : [
+          "b8",
+          "g8",
+          "c8",
+          "f8"
+        ];
 
   return allPieces(
     chess,
     color
-  ).filter(piece => {
-    if (
-      piece.piece.type !== "n" &&
-      piece.piece.type !== "b"
-    ) {
-      return false;
-    }
+  ).filter(
+    piece => {
+      if (
+        piece.piece.type !== "n" &&
+        piece.piece.type !== "b"
+      ) {
+        return false;
+      }
 
-    return !home.includes(
-      piece.square
-    );
-  }).length;
+      return !home.includes(
+        piece.square
+      );
+    }
+  ).length;
 }
 
 
 /* =========================================================
-   주도권 / 강제수
+   강제수
 ========================================================= */
 
 function forcingMoves(
@@ -1533,7 +1917,8 @@ function forcingMoves(
     const fields =
       chess.fen().split(" ");
 
-    fields[1] = color;
+    fields[1] =
+      color;
 
     const copy =
       new Chess(
@@ -1591,107 +1976,169 @@ function centerData(chess) {
 
 
 /* =========================================================
-   종합 전략 분석
+   전략 분석
 ========================================================= */
 
-function analyzeStrategy(chess) {
+function analyzeStrategy(
+  chess
+) {
   const materialInfo =
     material(chess);
 
   const whitePawns =
-    pawnInfo(chess, "w");
+    pawnInfo(
+      chess,
+      "w"
+    );
 
   const blackPawns =
-    pawnInfo(chess, "b");
+    pawnInfo(
+      chess,
+      "b"
+    );
 
   const bishops = {
-    w: allPieces(
-      chess,
-      "w",
-      "b"
-    ).map(piece => ({
-      ...piece,
-      info: bishopData(
+    w:
+      allPieces(
         chess,
-        piece
-      )
-    })),
+        "w",
+        "b"
+      ).map(
+        piece => ({
+          ...piece,
+          info:
+            bishopData(
+              chess,
+              piece
+            )
+        })
+      ),
 
-    b: allPieces(
-      chess,
-      "b",
-      "b"
-    ).map(piece => ({
-      ...piece,
-      info: bishopData(
+    b:
+      allPieces(
         chess,
-        piece
+        "b",
+        "b"
+      ).map(
+        piece => ({
+          ...piece,
+          info:
+            bishopData(
+              chess,
+              piece
+            )
+        })
       )
-    }))
   };
 
   const knights = {
-    w: allPieces(
-      chess,
-      "w",
-      "n"
-    ).map(piece => ({
-      ...piece,
-      info: knightData(
+    w:
+      allPieces(
         chess,
-        piece
-      )
-    })),
+        "w",
+        "n"
+      ).map(
+        piece => ({
+          ...piece,
+          info:
+            knightData(
+              chess,
+              piece
+            )
+        })
+      ),
 
-    b: allPieces(
-      chess,
-      "b",
-      "n"
-    ).map(piece => ({
-      ...piece,
-      info: knightData(
+    b:
+      allPieces(
         chess,
-        piece
+        "b",
+        "n"
+      ).map(
+        piece => ({
+          ...piece,
+          info:
+            knightData(
+              chess,
+              piece
+            )
+        })
       )
-    }))
   };
 
   const spaceInfo = {
-    w: space(chess, "w"),
-    b: space(chess, "b")
+    w:
+      space(
+        chess,
+        "w"
+      ),
+
+    b:
+      space(
+        chess,
+        "b"
+      )
   };
 
   const developmentInfo = {
-    w: development(chess, "w"),
-    b: development(chess, "b")
+    w:
+      development(
+        chess,
+        "w"
+      ),
+
+    b:
+      development(
+        chess,
+        "b"
+      )
   };
 
   const initiativeInfo = {
-    w: forcingMoves(chess, "w"),
-    b: forcingMoves(chess, "b")
+    w:
+      forcingMoves(
+        chess,
+        "w"
+      ),
+
+    b:
+      forcingMoves(
+        chess,
+        "b"
+      )
   };
 
   const kingInfo = {
-    w: kingPressure(chess, "w"),
-    b: kingPressure(chess, "b")
+    w:
+      kingPressure(
+        chess,
+        "w"
+      ),
+
+    b:
+      kingPressure(
+        chess,
+        "b"
+      )
   };
 
   let dominant = {
-    key: "activity",
-    side: null
+    key:
+      "activity",
+    side:
+      null
   };
 
   /*
-   * 가장 중요한 불균형을 고르는 순서.
-   * 단순히 고정 가중치를 주는 것이 아니라
-   * 현재 포지션에서 실제로 큰 차이가 나는 요소를 우선한다.
+   * 물질
    */
-
   if (
-    Math.abs(materialInfo.diff) >= 1.5
+    Math.abs(
+      materialInfo.diff
+    ) >= 1.5
   ) {
     dominant = {
-      key: "material",
+      key:
+        "material",
       side:
         materialInfo.diff > 0
           ? "w"
@@ -1699,34 +2146,49 @@ function analyzeStrategy(chess) {
     };
   }
 
+  /*
+   * 킹 안전
+   */
   else if (
     Math.abs(
-      kingInfo.w - kingInfo.b
+      kingInfo.w -
+      kingInfo.b
     ) >= 2
   ) {
     dominant = {
-      key: "king",
+      key:
+        "king",
       side:
-        kingInfo.w < kingInfo.b
+        kingInfo.w <
+        kingInfo.b
           ? "w"
           : "b"
     };
   }
 
+  /*
+   * 공간
+   */
   else if (
     Math.abs(
-      spaceInfo.w - spaceInfo.b
+      spaceInfo.w -
+      spaceInfo.b
     ) >= 5
   ) {
     dominant = {
-      key: "space",
+      key:
+        "space",
       side:
-        spaceInfo.w > spaceInfo.b
+        spaceInfo.w >
+        spaceInfo.b
           ? "w"
           : "b"
     };
   }
 
+  /*
+   * 개발 / 주도권
+   */
   else if (
     Math.abs(
       developmentInfo.w -
@@ -1738,7 +2200,9 @@ function analyzeStrategy(chess) {
     ) >= 2
   ) {
     dominant = {
-      key: "initiative",
+      key:
+        "initiative",
+
       side:
         developmentInfo.w +
           initiativeInfo.w >
@@ -1749,6 +2213,9 @@ function analyzeStrategy(chess) {
     };
   }
 
+  /*
+   * 폰 구조
+   */
   else if (
     Math.abs(
       (
@@ -1762,7 +2229,9 @@ function analyzeStrategy(chess) {
     ) >= 2
   ) {
     dominant = {
-      key: "structure",
+      key:
+        "structure",
+
       side:
         (
           whitePawns.isolated.length +
@@ -1778,19 +2247,25 @@ function analyzeStrategy(chess) {
   }
 
   return {
-    phase: phase(chess),
+    phase:
+      phase(chess),
 
-    material: materialInfo,
+    material:
+      materialInfo,
 
     pawns: {
-      w: whitePawns,
-      b: blackPawns
+      w:
+        whitePawns,
+      b:
+        blackPawns
     },
 
     bishops,
+
     knights,
 
-    space: spaceInfo,
+    space:
+      spaceInfo,
 
     development:
       developmentInfo,
@@ -1802,10 +2277,14 @@ function analyzeStrategy(chess) {
       kingInfo,
 
     center:
-      centerData(chess),
+      centerData(
+        chess
+      ),
 
     open:
-      openFiles(chess),
+      openFiles(
+        chess
+      ),
 
     dominant
   };
@@ -1813,20 +2292,28 @@ function analyzeStrategy(chess) {
 
 
 /* =========================================================
-   핵심 불균형 설명
+   전략 설명
 ========================================================= */
 
-function strategicText(strategy) {
+function strategicText(
+  strategy
+) {
   const dominant =
     strategy.dominant;
 
   const labels = {
-    material: "물질",
-    king: "킹 안전",
-    space: "공간",
-    initiative: "개발·주도권",
-    structure: "폰 구조",
-    activity: "기물 활동성"
+    material:
+      "물질",
+    king:
+      "킹 안전",
+    space:
+      "공간",
+    initiative:
+      "개발·주도권",
+    structure:
+      "폰 구조",
+    activity:
+      "기물 활동성"
   };
 
   const label =
@@ -1834,70 +2321,82 @@ function strategicText(strategy) {
       dominant.key
     ];
 
-  let reason = "";
-
   if (
     dominant.key ===
     "material"
   ) {
-    reason =
+    return (
+      `${label} — ` +
       `${side(dominant.side)}이 약 ` +
-      `${Math.abs(strategy.material.diff).toFixed(1)}점의 ` +
-      `물질 우세를 가지고 있어 다른 요소보다 직접적인 영향이 큽니다.`;
+      `${Math.abs(
+        strategy.material.diff
+      ).toFixed(1)}점의 ` +
+      `물질 우세를 가지고 있어 ` +
+      `다른 요소보다 직접적인 영향이 큽니다.`
+    );
   }
 
-  else if (
+  if (
     dominant.key ===
     "king"
   ) {
-    reason =
-      `${side(dominant.side)} 쪽의 킹 주변 압력이 ` +
-      `현재 더 중요합니다. 전술적 위협을 먼저 확인해야 합니다.`;
+    return (
+      `${label} — ` +
+      `${side(dominant.side)} 쪽 킹 주변에 ` +
+      `상대의 압력이 더 집중되어 있습니다. ` +
+      `계획보다 먼저 직접적인 전술 위협을 확인해야 합니다.`
+    );
   }
 
-  else if (
+  if (
     dominant.key ===
     "space"
   ) {
-    reason =
-      `${side(dominant.side)}이 더 넓은 활동 공간을 확보해 ` +
-      `기물의 기동성과 상대의 반격 가능성에 영향을 주고 있습니다.`;
+    return (
+      `${label} — ` +
+      `${side(dominant.side)}이 더 넓은 공간을 확보해 ` +
+      `기물의 기동성과 상대의 반격 가능성에 영향을 주고 있습니다.`
+    );
   }
 
-  else if (
+  if (
     dominant.key ===
     "initiative"
   ) {
-    reason =
+    return (
+      `${label} — ` +
       `${side(dominant.side)}이 더 많은 강제적인 수와 ` +
       `개발상의 시간 우위를 가지고 있습니다. ` +
-      `이 우세는 오래 기다리면 사라질 수 있습니다.`;
+      `이 우세는 오래 기다리면 사라질 수 있습니다.`
+    );
   }
 
-  else if (
+  if (
     dominant.key ===
     "structure"
   ) {
-    reason =
+    return (
+      `${label} — ` +
       `폰 구조의 차이가 장기적인 약점과 ` +
-      `기물의 활동 경로에 영향을 주고 있습니다.`;
+      `기물의 활동 경로에 영향을 주고 있습니다.`
+    );
   }
 
-  else {
-    reason =
-      `물질과 킹 안전의 차이가 결정적이지 않아 ` +
-      `실제 기물의 활동성과 개선 가능성을 우선 비교합니다.`;
-  }
-
-  return `${label} — ${reason}`;
+  return (
+    `${label} — ` +
+    `물질과 킹 안전의 차이가 결정적이지 않아 ` +
+    `현재 기물의 활동성과 개선 가능성을 우선 비교합니다.`
+  );
 }
 
 
 /* =========================================================
-   사람의 관점 출력
+   사람의 관점
 ========================================================= */
 
-function factorHTML(strategy) {
+function factorHTML(
+  strategy
+) {
   const output = [];
 
   output.push(`
@@ -1905,11 +2404,13 @@ function factorHTML(strategy) {
       <b>게임 단계</b>
       <span>
         ${
-          strategy.phase === "opening"
+          strategy.phase ===
+          "opening"
             ? "오프닝"
-            : strategy.phase === "endgame"
-              ? "엔드게임"
-              : "미들게임"
+            : strategy.phase ===
+              "endgame"
+                ? "엔드게임"
+                : "미들게임"
         }입니다.
       </span>
     </div>
@@ -1920,7 +2421,9 @@ function factorHTML(strategy) {
       <b>기물의 개수</b>
       <span>
         ${
-          Math.abs(strategy.material.diff) < 0.3
+          Math.abs(
+            strategy.material.diff
+          ) < 0.3
             ? "물질적으로 균형이 맞습니다."
             : `${
                 strategy.material.diff > 0
@@ -1936,6 +2439,9 @@ function factorHTML(strategy) {
     </div>
   `);
 
+  /*
+   * 비숍
+   */
   for (
     const color of ["w", "b"]
   ) {
@@ -1946,7 +2452,9 @@ function factorHTML(strategy) {
       const info =
         piece.info;
 
-      if (info.useful.length) {
+      if (
+        info.useful.length
+      ) {
         output.push(`
           <div class="factor">
             <b>
@@ -1956,13 +2464,14 @@ function factorHTML(strategy) {
             </b>
             <span>
               현재
-              ${
-                info.useful
-                  .slice(0, 2)
-                  .map(move => move.to)
-                  .join(", ")
-              }
-              같은 실제 진출 칸이 있습니다.
+              ${info.useful
+                .slice(0, 3)
+                .map(
+                  move =>
+                    move.to
+                )
+                .join(", ")}
+              같은 구체적인 진출 칸이 있습니다.
             </span>
           </div>
         `);
@@ -1975,15 +2484,18 @@ function factorHTML(strategy) {
               · 활동이 제한된 비숍
             </b>
             <span>
-              현재 유용한 대각선과 진출 칸이 많지 않습니다.
-              폰 구조를 바꾸거나 더 좋은 대각선을 확보하는
-              계획을 검토해야 합니다.
+              현재 눈에 띄는 진출 칸이 많지 않습니다.
+              폰 구조를 바꾸거나 더 좋은 대각선을
+              확보하는 계획을 검토할 필요가 있습니다.
             </span>
           </div>
         `);
       }
     }
 
+    /*
+     * 나이트
+     */
     for (
       const piece
       of strategy.knights[color]
@@ -2011,9 +2523,7 @@ function factorHTML(strategy) {
             </span>
           </div>
         `);
-      }
-
-      else if (
+      } else if (
         info.moves.length <= 1
       ) {
         output.push(`
@@ -2030,9 +2540,7 @@ function factorHTML(strategy) {
             </span>
           </div>
         `);
-      }
-
-      else {
+      } else {
         output.push(`
           <div class="factor">
             <b>
@@ -2042,7 +2550,7 @@ function factorHTML(strategy) {
             </b>
             <span>
               여러 진출점을 가지고 있습니다.
-              좋은 칸이 실제로 유지 가능한지도
+              다만 실제로 유지할 수 있는 좋은 칸인지도
               함께 확인해야 합니다.
             </span>
           </div>
@@ -2051,29 +2559,50 @@ function factorHTML(strategy) {
     }
   }
 
-  const pawnText =
-    (color, pawn) =>
-      `${color}: ` +
-      `${
-        pawn.doubled.length
-          ? `더블폰 ${pawn.doubled.join(", ")}. `
-          : ""
-      }` +
-      `${
-        pawn.isolated.length
-          ? `고립폰 ${pawn.isolated.join(", ")}. `
-          : ""
-      }` +
-      `${
-        pawn.backward.length
-          ? `후방폰 후보 ${pawn.backward.join(", ")}. `
-          : ""
-      }` +
-      `${
-        pawn.passed.length
-          ? `통과폰 ${pawn.passed.join(", ")}.`
-          : "뚜렷한 약점은 제한적입니다."
-      }`;
+  function pawnText(
+    name,
+    pawn
+  ) {
+    const parts = [];
+
+    if (
+      pawn.doubled.length
+    ) {
+      parts.push(
+        `더블폰 ${pawn.doubled.join(", ")}`
+      );
+    }
+
+    if (
+      pawn.isolated.length
+    ) {
+      parts.push(
+        `고립폰 ${pawn.isolated.join(", ")}`
+      );
+    }
+
+    if (
+      pawn.backward.length
+    ) {
+      parts.push(
+        `후방폰 후보 ${pawn.backward.join(", ")}`
+      );
+    }
+
+    if (
+      pawn.passed.length
+    ) {
+      parts.push(
+        `통과폰 ${pawn.passed.join(", ")}`
+      );
+    }
+
+    if (!parts.length) {
+      return `${name}: 뚜렷한 구조적 약점은 제한적입니다.`;
+    }
+
+    return `${name}: ${parts.join(". ")}.`;
+  }
 
   output.push(`
     <div class="factor">
@@ -2095,6 +2624,9 @@ function factorHTML(strategy) {
     </div>
   `);
 
+  /*
+   * 공간
+   */
   const spaceDifference =
     strategy.space.w -
     strategy.space.b;
@@ -2104,7 +2636,9 @@ function factorHTML(strategy) {
       <b>공간</b>
       <span>
         ${
-          spaceDifference === 0
+          Math.abs(
+            spaceDifference
+          ) < 2
             ? "양쪽의 공간 차이가 크지 않습니다."
             : `${
                 spaceDifference > 0
@@ -2113,12 +2647,15 @@ function factorHTML(strategy) {
               }이 더 많은 공간을 확보하고 있습니다.
               공간이 많은 쪽은 기동성을 활용하고,
               공간이 적은 쪽은 유리한 교환이나
-              반격을 찾는 방향이 일반적입니다.`
+              반격을 찾는 방향을 생각할 수 있습니다.`
         }
       </span>
     </div>
   `);
 
+  /*
+   * 중앙
+   */
   output.push(`
     <div class="factor">
       <b>중앙</b>
@@ -2128,15 +2665,18 @@ function factorHTML(strategy) {
             ? escape(
                 strategy.center.join(", ")
               )
-            : "중앙 네 칸에 직접 놓인 폰이나 기물이 많지 않습니다."
+            : "중앙 네 칸에 직접 놓인 기물이 많지 않습니다."
         }.
-        중앙의 가치는 단순 점유보다
+        중앙의 가치는 단순히 차지하고 있는지보다
         상대 기물의 활동을 실제로 제한하는지를
         함께 봐야 합니다.
       </span>
     </div>
   `);
 
+  /*
+   * 오픈 파일
+   */
   output.push(`
     <div class="factor">
       <b>오픈 파일</b>
@@ -2152,6 +2692,9 @@ function factorHTML(strategy) {
     </div>
   `);
 
+  /*
+   * 개발 / 주도권
+   */
   const developmentDifference =
     strategy.development.w -
     strategy.development.b;
@@ -2165,7 +2708,9 @@ function factorHTML(strategy) {
       <b>개발·주도권</b>
       <span>
         ${
-          developmentDifference === 0
+          Math.abs(
+            developmentDifference
+          ) < 1
             ? "경량 기물의 개발 정도는 비슷합니다."
             : `${
                 developmentDifference > 0
@@ -2189,6 +2734,9 @@ function factorHTML(strategy) {
     </div>
   `);
 
+  /*
+   * 킹 안전
+   */
   const kingDifference =
     strategy.king.w -
     strategy.king.b;
@@ -2198,35 +2746,44 @@ function factorHTML(strategy) {
       <b>킹 안전</b>
       <span>
         ${
-          kingDifference === 0
+          Math.abs(
+            kingDifference
+          ) < 2
             ? "양쪽 킹의 안전 차이가 현재 결정적이지 않습니다."
             : `${
                 kingDifference < 0
                   ? "백"
                   : "흑"
-              } 킹 주변에서 상대의 공격 압력이 더 큽니다.
-              먼저 직접적인 전술 위협을 확인해야 합니다.`
+              } 킹 주변에 상대의 공격 압력이 더 큽니다.
+              직접적인 전술 위협을 먼저 확인해야 합니다.`
         }
       </span>
     </div>
   `);
 
+  /*
+   * 핵심 불균형
+   */
   output.push(`
     <div class="factor">
       <b>현재 가장 중요한 불균형</b>
       <span>
         ${escape(
-          strategicText(strategy)
+          strategicText(
+            strategy
+          )
         )}
       </span>
     </div>
   `);
 
+  /*
+   * 정적 / 동적
+   */
   const dynamic =
     [
       "initiative",
-      "king",
-      "activity"
+      "king"
     ].includes(
       strategy.dominant.key
     );
@@ -2238,29 +2795,34 @@ function factorHTML(strategy) {
         ${
           dynamic
             ? "현재 중요한 요소에는 동적인 성격이 강합니다. 시간을 주면 사라질 수 있으므로 더 오래가는 우세나 구체적인 이득으로 바꾸는 것이 중요합니다."
-            : "현재 중요한 요소는 폰 구조나 물질처럼 비교적 오래 지속되는 정적 요소에 가깝습니다."
+            : "현재 중요한 요소는 물질이나 폰 구조처럼 비교적 오래 지속되는 정적 요소에 가깝습니다."
         }
       </span>
     </div>
   `);
 
+  /*
+   * 상대의 반격
+   */
   output.push(`
     <div class="factor">
       <b>상대의 반격</b>
       <span>
-        현재 상대가 체크·잡기·전진·돌파를 통해
-        즉시 상황을 바꿀 수 있는지를 먼저 확인한 뒤
-        계획을 실행해야 합니다.
+        다음 수를 찾기 전에 상대가 체크·잡기·전진·돌파로
+        즉시 상황을 바꿀 수 있는지를 먼저 확인해야 합니다.
       </span>
     </div>
   `);
 
+  /*
+   * 생각의 순서
+   */
   output.push(`
     <div class="factor">
       <b>생각의 순서</b>
       <span>
         불균형을 찾고 →
-        어느 쪽에서 플레이할지 정하고 →
+        플레이할 쪽을 정하고 →
         상대의 반격을 확인하고 →
         원하는 포지션을 그린 뒤 →
         후보 수를 만들고 →
@@ -2274,22 +2836,29 @@ function factorHTML(strategy) {
 
 
 /* =========================================================
-   후보 수 생성
+   후보 수 분류
 ========================================================= */
 
 function moveTags(
-  chess,
   move,
   strategy
 ) {
   const tags = [];
 
-  if (move.captured) {
-    tags.push("교환/잡기");
+  if (
+    move.captured
+  ) {
+    tags.push(
+      "교환/잡기"
+    );
   }
 
-  if (move.san.includes("+")) {
-    tags.push("킹 압박");
+  if (
+    move.san.includes("+")
+  ) {
+    tags.push(
+      "킹 압박"
+    );
   }
 
   if (
@@ -2299,291 +2868,103 @@ function moveTags(
       "d5",
       "e4",
       "e5"
-    ].includes(move.to)
+    ].includes(
+      move.to
+    )
   ) {
-    tags.push("중앙");
+    tags.push(
+      "중앙"
+    );
   }
 
   if (
     move.piece === "p" &&
     Math.abs(
-      Number(move.to[1]) -
-      Number(move.from[1])
+      Number(
+        move.to[1]
+      ) -
+      Number(
+        move.from[1]
+      )
     ) >= 2
   ) {
-    tags.push("공간/돌파");
+    tags.push(
+      "공간/돌파"
+    );
   }
 
   if (
     move.piece === "n" ||
     move.piece === "b"
   ) {
-    tags.push("기물 개선");
+    tags.push(
+      "기물 개선"
+    );
   }
 
   if (
-    move.piece === "r" &&
-    move.to[0] !== move.from[0]
+    move.piece === "r"
   ) {
-    tags.push("파일 활용");
+    tags.push(
+      "룩 활용"
+    );
   }
 
   if (
-    strategy.dominant.key === "space" &&
+    strategy?.dominant?.key ===
+      "space" &&
     move.piece === "p"
   ) {
-    tags.push("공간 계획");
+    tags.push(
+      "공간 계획"
+    );
   }
 
   if (
-    strategy.dominant.key === "material" &&
+    strategy?.dominant?.key ===
+      "material" &&
     move.captured
   ) {
-    tags.push("물질 활용");
+    tags.push(
+      "물질 활용"
+    );
   }
 
   if (
-    strategy.dominant.key === "king" &&
+    strategy?.dominant?.key ===
+      "king" &&
     move.san.includes("+")
   ) {
-    tags.push("킹 공격");
+    tags.push(
+      "킹 공격"
+    );
   }
 
   if (
-    strategy.dominant.key === "initiative" &&
+    strategy?.dominant?.key ===
+      "initiative" &&
     move.piece !== "p"
   ) {
-    tags.push("주도권");
+    tags.push(
+      "주도권"
+    );
   }
 
   if (!tags.length) {
-    tags.push("계획 수");
+    tags.push(
+      "계획 수"
+    );
   }
 
   return tags;
 }
 
-function candidatePool(
-  fen,
-  engineLines,
-  strategy
-) {
-  const chess =
-    new Chess(fen);
-
-  const legal =
-    chess.moves({
-      verbose: true
-    });
-
-  const engineMoves =
-    new Set(
-      engineLines.map(
-        line =>
-          firstUci(line)
-      )
-    );
-
-  const candidates = [];
-
-  for (
-    const move of legal
-  ) {
-    const uci =
-      `${move.from}${move.to}${move.promotion || ""}`;
-
-    if (
-      engineMoves.has(uci)
-    ) {
-      continue;
-    }
-
-    let priority = 0;
-
-    if (move.captured) {
-      priority += 3;
-    }
-
-    if (move.san.includes("+")) {
-      priority += 5;
-    }
-
-    if (
-      [
-        "d4",
-        "d5",
-        "e4",
-        "e5"
-      ].includes(move.to)
-    ) {
-      priority += 2;
-    }
-
-    if (
-      move.piece === "n" ||
-      move.piece === "b"
-    ) {
-      priority += 1;
-    }
-
-    if (
-      strategy.dominant.key ===
-      "space" &&
-      move.piece === "p"
-    ) {
-      priority += 2;
-    }
-
-    if (
-      strategy.dominant.key ===
-      "material" &&
-      move.captured
-    ) {
-      priority += 2;
-    }
-
-    if (
-      strategy.dominant.key ===
-      "king" &&
-      move.san.includes("+")
-    ) {
-      priority += 3;
-    }
-
-    if (
-      strategy.dominant.key ===
-      "initiative" &&
-      move.piece !== "p"
-    ) {
-      priority += 1;
-    }
-
-    candidates.push({
-      move,
-      uci,
-      priority
-    });
-  }
-
-  return candidates
-    .sort(
-      (a, b) =>
-        b.priority -
-        a.priority
-    )
-    .slice(0, 5);
-}
-
 
 /* =========================================================
-   전략 후보 실제 검증
+   후보 수 생성
 ========================================================= */
 
-async function validateCandidate(
-  fen,
-  candidate,
-  baseScore
-) {
-  const next =
-    applyUci(
-      fen,
-      candidate.uci
-    );
-
-  if (!next) {
-    return null;
-  }
-
-  try {
-    const result =
-      await analyzeFen(
-        next.fen,
-        9
-      );
-
-    const score =
-      result.lines[0]?.score;
-
-    if (score == null) {
-      return null;
-    }
-
-    const difference =
-      Math.abs(
-        baseScore - score
-      );
-
-    /*
-     * 명백히 나쁜 수는
-     * 전략적 대안으로 표시하지 않는다.
-     */
-    if (
-      difference > 1.5
-    ) {
-      return null;
-    }
-
-    return {
-      san: candidate.move.san,
-      score,
-      pv:
-        result.lines[0]
-          ? `${candidate.move.san} ${sanPv(
-              next.fen,
-              result.lines[0].pv
-            )}`
-          : candidate.move.san,
-
-      tags:
-        moveTags(
-          new Chess(fen),
-          candidate.move,
-          null
-        )
-    };
-  } catch {
-    return null;
-  }
-}
-
-
-/* =========================================================
-   후보 설명
-========================================================= */
-
-function candidateDescription(
-  candidate,
-  type
-) {
-  if (type === "best") {
-    return (
-      "현재 포지션에서 엔진이 가장 강하게 추천하는 수입니다."
-    );
-  }
-
-  if (type === "strategic") {
-    return (
-      "현재의 핵심 불균형을 다른 방식으로 다루는 전략적 대안입니다."
-    );
-  }
-
-  if (type === "practical") {
-    return (
-      "실전에서 계획을 세우기 쉽고 상대의 선택을 제한할 수 있는 후보입니다."
-    );
-  }
-
-  return (
-    "현재와 다른 계획을 선택하는 후보입니다. 구체적인 결과를 확인한 뒤 선택해야 합니다."
-  );
-}
-
-
-/* =========================================================
-   후보 전체 생성
-========================================================= */
-
-async function buildCandidates(
+function buildCandidates(
   fen,
   analysis,
   strategy
@@ -2594,20 +2975,21 @@ async function buildCandidates(
   const output = [];
 
   /*
-   * 1. 엔진 최선
+   * 엔진 최선
    */
-
-  if (lines[0]) {
+  if (
+    lines[0]
+  ) {
     const move =
       applyUci(
         fen,
-        firstUci(lines[0])
+        lines[0].pv[0]
       );
 
     output.push({
       san:
         move?.san ||
-        firstUci(lines[0]),
+        lines[0].pv[0],
 
       score:
         lines[0].score,
@@ -2622,67 +3004,238 @@ async function buildCandidates(
         "엔진 최선",
 
       desc:
-        candidateDescription(
-          null,
-          "best"
-        )
+        "현재 포지션에서 엔진이 가장 강하게 추천하는 수입니다."
     });
   }
 
   /*
-   * 2~4. 전략적 / 실전적 후보
+   * MultiPV 2~3.
+   *
+   * 이미 같은 포지션을 분석한 결과이므로
+   * 다시 엔진을 호출하지 않는다.
    */
-
-  const baseScore =
-    lines[0]?.score ?? 0;
-
-  const pool =
-    candidatePool(
-      fen,
-      lines,
-      strategy
-    );
-
   for (
-    let i = 0;
-    i < pool.length &&
-    output.length < 4;
+    let i = 1;
+    i < lines.length &&
+    output.length < 3;
     i++
   ) {
-    const validated =
-      await validateCandidate(
+    const line =
+      lines[i];
+
+    const move =
+      applyUci(
         fen,
-        pool[i],
-        baseScore
+        line.pv[0]
       );
 
-    if (!validated) {
+    if (!move) {
       continue;
     }
 
-    const type =
-      i === 0
-        ? "strategic"
-        : i === 1
-          ? "practical"
-          : "other";
+    const tags =
+      moveTags(
+        move.move,
+        strategy
+      );
+
+    const scoreDifference =
+      Math.abs(
+        (
+          lines[0]?.score ?? 0
+        ) -
+        line.score
+      );
+
+    /*
+     * 엔진 최선과 너무 큰 차이가 나는 수는
+     * 좋은 전략적 대안이라고 포장하지 않는다.
+     */
+    if (
+      scoreDifference > 1.2
+    ) {
+      continue;
+    }
+
+    let tag =
+      "전략적 대안";
+
+    if (
+      tags.includes(
+        "킹 압박"
+      ) ||
+      tags.includes(
+        "교환/잡기"
+      )
+    ) {
+      tag =
+        "실전적 대안";
+    }
+
+    if (
+      strategy.dominant.key ===
+        "space" &&
+      tags.includes(
+        "공간 계획"
+      )
+    ) {
+      tag =
+        "전략적 대안";
+    }
 
     output.push({
-      ...validated,
+      san:
+        move.san,
 
-      tag:
-        type === "strategic"
-          ? "전략적 대안"
-          : type === "practical"
-            ? "실전적 대안"
-            : "다른 계획",
+      score:
+        line.score,
+
+      pv:
+        sanPv(
+          fen,
+          line.pv
+        ),
+
+      tag,
 
       desc:
-        candidateDescription(
-          validated,
-          type
-        )
+        `현재의 핵심 불균형을 다른 방식으로 다루는 후보입니다. ${
+          tags.join(" · ")
+        }.`
     });
+  }
+
+  /*
+   * MultiPV가 부족하면 실제 합법수 중에서
+   * 단순한 계획 후보를 몇 개 보여준다.
+   *
+   * 여기서는 엔진을 다시 호출하지 않는다.
+   */
+  if (
+    output.length < 3
+  ) {
+    const chess =
+      new Chess(fen);
+
+    const legal =
+      chess.moves({
+        verbose: true
+      });
+
+    const used =
+      new Set(
+        output.map(
+          candidate =>
+            candidate.san
+        )
+      );
+
+    const extra =
+      legal
+        .filter(
+          move =>
+            !used.has(
+              move.san
+            )
+        )
+        .sort(
+          (a, b) => {
+            let pa = 0;
+            let pb = 0;
+
+            if (
+              a.captured
+            ) {
+              pa += 3;
+            }
+
+            if (
+              b.captured
+            ) {
+              pb += 3;
+            }
+
+            if (
+              a.san.includes("+")
+            ) {
+              pa += 5;
+            }
+
+            if (
+              b.san.includes("+")
+            ) {
+              pb += 5;
+            }
+
+            if (
+              [
+                "d4",
+                "d5",
+                "e4",
+                "e5"
+              ].includes(
+                a.to
+              )
+            ) {
+              pa += 2;
+            }
+
+            if (
+              [
+                "d4",
+                "d5",
+                "e4",
+                "e5"
+              ].includes(
+                b.to
+              )
+            ) {
+              pb += 2;
+            }
+
+            return pb - pa;
+          }
+        )
+        .slice(
+          0,
+          5
+        );
+
+    for (
+      const move of extra
+    ) {
+      if (
+        output.length >= 3
+      ) {
+        break;
+      }
+
+      /*
+       * 엔진 검증 없이
+       * "전략적 대안"이라고 부르지 않는다.
+       */
+      output.push({
+        san:
+          move.san,
+
+        score:
+          null,
+
+        pv:
+          move.san,
+
+        tag:
+          "다른 계획",
+
+        desc:
+          `엔진 최선과 다른 계획입니다. ${
+            moveTags(
+              move,
+              strategy
+            ).join(" · ")
+          }.`
+      });
+    }
   }
 
   return output;
@@ -2698,47 +3251,83 @@ function reviewText(
   after,
   actualSan
 ) {
-  const difference =
-    +(after - before).toFixed(2);
-
   if (
-    Math.abs(difference) < 0.15
+    before == null ||
+    after == null
   ) {
     return {
-      title: "좋은 수",
+      title:
+        "복기 준비 중",
+
       text:
-        `${actualSan}은 평가를 거의 악화시키지 않았고 현재의 중요한 요소를 유지했습니다.`
+        "현재 수와 이전 포지션의 평가를 비교할 수 있는 정보가 아직 충분하지 않습니다."
     };
   }
 
+  /*
+   * 백 기준 평가.
+   *
+   * 실제로 둔 쪽을 고려해
+   * 평가 변화의 방향을 해석한다.
+   */
+  const difference =
+    +(
+      after -
+      before
+    ).toFixed(2);
+
   if (
-    difference > 0.15
+    Math.abs(
+      difference
+    ) < 0.15
   ) {
     return {
-      title: "주의할 수",
+      title:
+        "평가 유지",
+
       text:
-        `${actualSan} 이후 평가가 약 ${difference.toFixed(2)}만큼 상대에게 이동했습니다. 수 자체보다 그 결과 생긴 불균형을 확인하는 것이 중요합니다.`
+        `${actualSan}은 평가를 거의 바꾸지 않았고 현재 포지션의 중요한 요소를 유지했습니다.`
+    };
+  }
+
+  const mover =
+    actualSan
+      ? null
+      : null;
+
+  if (
+    difference > 0
+  ) {
+    return {
+      title:
+        "백에게 유리하게 변화",
+
+      text:
+        `${actualSan} 이후 엔진 평가가 백 쪽으로 약 ${difference.toFixed(2)}만큼 이동했습니다.`
     };
   }
 
   return {
-    title: "개선된 수",
+    title:
+      "흑에게 유리하게 변화",
+
     text:
-      `${actualSan} 이후 평가가 약 ${Math.abs(difference).toFixed(2)}만큼 유리해졌습니다. 이 수가 어떤 불균형을 활용했는지 확인할 가치가 있습니다.`
+      `${actualSan} 이후 엔진 평가가 흑 쪽으로 약 ${Math.abs(difference).toFixed(2)}만큼 이동했습니다.`
   };
 }
 
 
 /* =========================================================
-   현재 포지션 전체 분석
+   현재 포지션 분석
 ========================================================= */
 
 async function analyzeCurrent() {
   const position =
     positions[ply];
 
-  const token =
-    ++generation;
+  if (!position) {
+    return;
+  }
 
   renderBoard(
     position.fen
@@ -2751,7 +3340,9 @@ async function analyzeCurrent() {
 
   E.position.textContent =
     ply
-      ? `${Math.ceil(ply / 2)}${
+      ? `${Math.ceil(
+          ply / 2
+        )}${
           ply % 2
             ? ". "
             : "… "
@@ -2761,16 +3352,23 @@ async function analyzeCurrent() {
   E.eval.textContent =
     "분석 중…";
 
+  E.depth.textContent =
+    "—";
+
+  E.insight.textContent =
+    "포지션을 분석하고 있습니다.";
+
   E.candidates.innerHTML =
     "";
 
-  setProgress(0, 0);
+  setProgress(
+    0,
+    0
+  );
 
   /*
-   * 전략 분석은 Stockfish와 별개로
-   * 현재 포지션의 구조를 먼저 읽는다.
+   * 전략 분석은 엔진과 독립적이다.
    */
-
   const chess =
     new Chess(
       position.fen
@@ -2787,24 +3385,49 @@ async function analyzeCurrent() {
     );
 
   /*
-   * 엔진 분석
+   * 핵심:
+   *
+   * 현재 포지션은 Stockfish를
+   * 딱 한 번 분석한다.
+   *
+   * MultiPV 3 결과를 한 번에 받는다.
    */
+  let result;
 
-  const result =
-    await analyzeFen(
-      position.fen,
-      11
-    );
+  try {
+    result =
+      await analyzeFen(
+        position.fen,
+        8
+      );
+  } catch (error) {
+    if (
+      error.message ===
+      "cancelled"
+    ) {
+      return;
+    }
 
-  if (
-    token !== generation
-  ) {
-    return;
+    E.eval.textContent =
+      "분석 실패";
+
+    E.depth.textContent =
+      "—";
+
+    E.insight.textContent =
+      error.message ||
+      "엔진 분석에 실패했습니다.";
+
+    throw error;
   }
 
   const bestScore =
     result.lines[0]?.score;
 
+  /*
+   * 엔진 결과를 받았으면
+   * 바로 화면에 표시한다.
+   */
   E.eval.textContent =
     scoreText(
       bestScore
@@ -2821,90 +3444,110 @@ async function analyzeCurrent() {
   );
 
   /*
-   * MultiPV + 전략 후보
+   * 후보 수.
+   *
+   * 여기서는 다시 엔진을 돌리지 않는다.
    */
-
   const candidates =
-    await buildCandidates(
+    buildCandidates(
       position.fen,
       result,
       strategy
     );
 
-  if (
-    token !== generation
-  ) {
-    return;
-  }
-
   E.candidates.innerHTML =
     candidates
-      .slice(0, 4)
+      .slice(
+        0,
+        3
+      )
       .map(
         (candidate, index) => `
           <div class="candidate">
+
             <div class="candidateTop">
+
               <span class="candidateName">
                 ${index + 1}.
-                ${escape(candidate.san)}
+                ${escape(
+                  candidate.san
+                )}
                 ·
-                ${escape(candidate.tag)}
+                ${escape(
+                  candidate.tag
+                )}
               </span>
 
               <span class="candidateScore">
-                ${scoreText(candidate.score)}
+                ${
+                  candidate.score == null
+                    ? "검증 필요"
+                    : scoreText(
+                        candidate.score
+                      )
+                }
               </span>
+
             </div>
 
             <div class="candidateDesc">
-              ${escape(candidate.desc)}
+
+              ${escape(
+                candidate.desc
+              )}
+
               <br>
 
               <span class="muted">
-                ${escape(candidate.pv)}
+                ${escape(
+                  candidate.pv
+                )}
               </span>
+
             </div>
+
           </div>
         `
       )
       .join("");
 
   /*
-   * 실제 둔 수 복기
+   * 이전 포지션이 캐시에 이미 있으면
+   * 추가 엔진 호출 없이 실제 수를 복기한다.
    */
-
-  if (ply > 0) {
+  if (
+    ply > 0
+  ) {
     const previous =
-      positions[ply - 1];
+      positions[
+        ply - 1
+      ];
 
-    try {
-      const beforeResult =
-        await analyzeFen(
-          previous.fen,
-          8
+    const previousKey =
+      `${previous.fen}|8`;
+
+    const previousResult =
+      cache.get(
+        previousKey
+      );
+
+    if (
+      previousResult &&
+      previousResult.lines[0] &&
+      bestScore != null
+    ) {
+      const review =
+        reviewText(
+          previousResult.lines[0].score,
+          bestScore,
+          position.san
         );
 
-      const before =
-        beforeResult.lines[0]?.score;
-
-      const after =
-        bestScore;
-
-      if (
-        before != null &&
-        after != null
-      ) {
-        const review =
-          reviewText(
-            before,
-            after,
-            position.san
-          );
-
-        E.insight.textContent =
-          `${scoreWords(after)} ${review.title}: ${review.text}`;
-      }
-    } catch {}
+      E.insight.textContent =
+        `${scoreWords(
+          bestScore
+        )} ${review.title}: ${review.text}`;
+    }
   }
 }
 
@@ -2913,8 +3556,15 @@ async function analyzeCurrent() {
    수 선택
 ========================================================= */
 
-async function selectPly(number) {
-  stopJob();
+async function selectPly(
+  number
+) {
+  /*
+   * 이전 분석 중지
+   */
+  if (activeJob) {
+    cancelEngineJob();
+  }
 
   ply =
     Math.max(
@@ -2969,7 +3619,9 @@ async function start() {
 
   try {
     game =
-      loadGame(text);
+      loadGame(
+        text
+      );
   } catch {
     showError(
       "PGN을 읽을 수 없습니다. 기보 형식을 확인해주세요."
@@ -2991,7 +3643,17 @@ async function start() {
     return;
   }
 
+  /*
+   * 기존 분석 캐시 제거
+   */
   cache.clear();
+
+  /*
+   * 기존 작업 취소
+   */
+  if (activeJob) {
+    cancelEngineJob();
+  }
 
   ply = 0;
 
@@ -3006,8 +3668,14 @@ async function start() {
 
   renderMoves();
 
+  /*
+   * 엔진 준비
+   */
   await bootEngine();
 
+  /*
+   * 첫 포지션 분석
+   */
   await selectPly(0);
 }
 
@@ -3016,12 +3684,14 @@ async function start() {
    이벤트
 ========================================================= */
 
-E.example.onclick = () => {
-  E.pgn.value =
-    EXAMPLE;
+E.example.onclick =
+  () => {
+    E.pgn.value =
+      EXAMPLE;
 
-  clearError();
-};
+    clearError();
+  };
+
 
 E.analyze.onclick =
   async () => {
@@ -3041,30 +3711,46 @@ E.analyze.onclick =
     }
   };
 
-E.back.onclick = () => {
-  stopJob();
 
-  E.analysisView.hidden =
-    true;
+E.back.onclick =
+  () => {
+    if (activeJob) {
+      cancelEngineJob();
+    }
 
-  E.inputView.hidden =
-    false;
-};
+    E.analysisView.hidden =
+      true;
+
+    E.inputView.hidden =
+      false;
+  };
+
 
 E.first.onclick =
-  () => selectPly(0);
+  () =>
+    selectPly(0);
+
 
 E.prev.onclick =
-  () => selectPly(ply - 1);
+  () =>
+    selectPly(
+      ply - 1
+    );
+
 
 E.next.onclick =
-  () => selectPly(ply + 1);
+  () =>
+    selectPly(
+      ply + 1
+    );
+
 
 E.last.onclick =
   () =>
     selectPly(
       positions.length - 1
     );
+
 
 E.pgn.addEventListener(
   "input",
@@ -3073,7 +3759,9 @@ E.pgn.addEventListener(
 
 
 /* =========================================================
-   시작
+   초기 엔진 준비
 ========================================================= */
 
-bootEngine().catch(() => {});
+bootEngine().catch(
+  () => {}
+);
