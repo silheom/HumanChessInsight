@@ -117,3 +117,156 @@ main {
 .analysis-scroll * {
   overscroll-behavior-x: none;
 }
+
+/* =========================================================
+   Human Chess Insight
+   분석 화면 구조 보정
+   ========================================================= */
+
+/*
+   분석 화면에서는 체스판 영역을 고정하고
+   아래의 수순 / 평가 / 사람의 관점만 스크롤한다.
+*/
+
+#analysisView {
+  height: 100%;
+  min-height: 0;
+}
+
+.analysis-layout {
+  display: flex;
+  flex-direction: column;
+
+  height: 100vh;
+  height: 100dvh;
+
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* =========================================================
+   체스판 영역
+   ========================================================= */
+
+.board-section {
+  flex: 0 0 auto;
+
+  width: 100%;
+
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+/*
+   boardCard 자체는 내용 높이만 사용한다.
+*/
+.board-section .boardCard {
+  width: 100%;
+  max-width: 620px;
+
+  margin-left: auto;
+  margin-right: auto;
+
+  box-sizing: border-box;
+}
+
+/*
+   체스판 크기
+   기존 .board의 8×8 구조를 유지한다.
+*/
+.board-section .board {
+  width: 100%;
+  max-width: 620px;
+
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* =========================================================
+   아래 분석 영역
+   ========================================================= */
+
+.analysis-scroll {
+  flex: 1 1 auto;
+
+  min-height: 0;
+
+  overflow-y: auto;
+  overflow-x: hidden;
+
+  -webkit-overflow-scrolling: touch;
+
+  padding: 8px;
+  box-sizing: border-box;
+
+  overscroll-behavior: contain;
+}
+
+/*
+   수순 / 평가 / 사람의 관점 카드의 폭
+*/
+.analysis-scroll > * {
+  width: 100%;
+  max-width: 620px;
+
+  margin-left: auto;
+  margin-right: auto;
+
+  box-sizing: border-box;
+}
+
+/* =========================================================
+   모바일 터치 스크롤
+   ========================================================= */
+
+.analysis-scroll {
+  scrollbar-width: thin;
+
+  overscroll-behavior-y: contain;
+  overscroll-behavior-x: none;
+}
+
+.analysis-scroll * {
+  overscroll-behavior-x: none;
+}
+
+/* =========================================================
+   작은 화면
+   ========================================================= */
+
+@media (max-width: 700px) {
+
+  .board-section {
+    padding: 6px;
+  }
+
+  .analysis-scroll {
+    padding: 6px;
+  }
+
+  .board-section .boardCard {
+    max-width: none;
+  }
+
+  .board-section .board {
+    width: 100%;
+    max-width: none;
+  }
+
+}
+
+/* =========================================================
+   아주 작은 화면
+   ========================================================= */
+
+@media (max-width: 400px) {
+
+  .board-section {
+    padding: 4px;
+  }
+
+  .analysis-scroll {
+    padding: 4px;
+  }
+
+}
