@@ -1,146 +1,335 @@
 /* =========================================================
    Human Chess Insight
-   분석 화면 레이아웃
-   - 체스판은 상단에 고정
-   - 아래 분석 영역만 스크롤
+   전체 스타일
    ========================================================= */
+
+* {
+  box-sizing: border-box;
+}
 
 html,
 body {
   margin: 0;
   padding: 0;
-  height: 100%;
+  width: 100%;
+  min-height: 100%;
 }
 
 body {
-  overflow: hidden;
-}
+  background: #111318;
+  color: #f1f3f5;
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
 
-/* 전체 앱 영역 */
-.app,
-.container,
-main {
-  min-height: 0;
-}
-
-/* 분석 화면의 전체 구조 */
-.analysis-layout {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  height: 100dvh;
-  min-height: 0;
-  overflow: hidden;
-}
-
-/* ---------------------------------------------------------
-   체스판 영역
-   --------------------------------------------------------- */
-
-.board-section {
-  flex: 0 0 auto;
-  width: 100%;
-  padding: 12px;
-  box-sizing: border-box;
-  background: inherit;
-}
-
-/* 체스판은 화면 폭을 넘지 않음 */
-.board-section .board {
-  width: min(100%, 620px);
-  max-width: 620px;
-  margin-left: auto;
-  margin-right: auto;
-}
-
-/* ---------------------------------------------------------
-   체스판 아래 분석 영역
-   --------------------------------------------------------- */
-
-.analysis-scroll {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
   overflow-x: hidden;
-
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
-
-  padding: 12px;
-  box-sizing: border-box;
-}
-
-/* ---------------------------------------------------------
-   수순 / 현재 평가 / 사람의 관점
-   --------------------------------------------------------- */
-
-.analysis-scroll > * {
-  max-width: 620px;
-  margin-left: auto;
-  margin-right: auto;
-}
-
-/* ---------------------------------------------------------
-   모바일
-   --------------------------------------------------------- */
-
-@media (max-width: 700px) {
-
-  .board-section {
-    padding: 8px;
-  }
-
-  .analysis-scroll {
-    padding: 8px;
-  }
-
-  /*
-     체스판은 항상 위에 남아 있고,
-     아래 내용만 손가락으로 스크롤한다.
-  */
-  .board-section .board {
-    width: 100%;
-    max-width: 620px;
-  }
-}
-
-/* ---------------------------------------------------------
-   분석 결과가 길어졌을 때
-   --------------------------------------------------------- */
-
-.analysis-scroll {
-  scrollbar-width: thin;
-}
-
-/* 터치 스크롤 안정화 */
-.analysis-scroll,
-.analysis-scroll * {
-  overscroll-behavior-x: none;
 }
 
 /* =========================================================
-   Human Chess Insight
-   분석 화면 구조 보정
+   전체 앱
+   ========================================================= */
+
+.app {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 20px;
+}
+
+/* =========================================================
+   상단 제목
+   ========================================================= */
+
+.topbar {
+  width: 100%;
+  max-width: 1100px;
+
+  margin: 0 auto 20px;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.topbar h1 {
+  margin: 0;
+
+  font-size: clamp(28px, 6vw, 44px);
+  line-height: 1.1;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+}
+
+.topbar p {
+  margin: 8px 0 0;
+
+  color: #aeb4bf;
+
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+/* =========================================================
+   엔진 상태
+   ========================================================= */
+
+.status {
+  flex: 0 0 auto;
+
+  display: inline-flex;
+  align-items: center;
+
+  padding: 8px 12px;
+
+  border-radius: 999px;
+
+  font-size: 13px;
+  font-weight: 700;
+
+  white-space: nowrap;
+}
+
+.status.loading {
+  background: #292d35;
+  color: #d6dae0;
+}
+
+.status.ready {
+  background: #18351f;
+  color: #8ee6a1;
+}
+
+.status.error {
+  background: #3b1d21;
+  color: #ff9da8;
+}
+
+/* =========================================================
+   카드
+   ========================================================= */
+
+.card {
+  width: 100%;
+  max-width: 1100px;
+
+  margin-left: auto;
+  margin-right: auto;
+
+  padding: 18px;
+
+  background: #1a1d23;
+
+  border: 1px solid #2b3039;
+  border-radius: 16px;
+
+  box-shadow:
+    0 8px 30px rgba(0, 0, 0, 0.18);
+}
+
+/* =========================================================
+   PGN 입력
+   ========================================================= */
+
+#inputView {
+  max-width: 900px;
+}
+
+#inputView label {
+  display: block;
+
+  margin-bottom: 8px;
+
+  font-size: 15px;
+  font-weight: 700;
+}
+
+#pgnInput {
+  width: 100%;
+  min-height: 260px;
+
+  padding: 14px;
+
+  resize: vertical;
+
+  background: #101217;
+  color: #f1f3f5;
+
+  border: 1px solid #343944;
+  border-radius: 12px;
+
+  outline: none;
+
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    monospace;
+
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+#pgnInput:focus {
+  border-color: #737b8a;
+}
+
+#pgnInput::placeholder {
+  color: #6f7682;
+}
+
+/* =========================================================
+   버튼
+   ========================================================= */
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+
+  margin-top: 12px;
+}
+
+button {
+  appearance: none;
+
+  border: 0;
+
+  font: inherit;
+  font-weight: 700;
+
+  cursor: pointer;
+
+  transition:
+    transform 0.12s ease,
+    opacity 0.12s ease,
+    background 0.12s ease;
+}
+
+button:active {
+  transform: scale(0.97);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.primary,
+.secondary {
+  min-height: 42px;
+
+  padding: 10px 16px;
+
+  border-radius: 10px;
+}
+
+.primary {
+  background: #f1f3f5;
+  color: #111318;
+}
+
+.primary:hover {
+  background: #ffffff;
+}
+
+.secondary {
+  background: #292d35;
+  color: #edf0f4;
+
+  border: 1px solid #3a404b;
+}
+
+.secondary:hover {
+  background: #323741;
+}
+
+.small {
+  min-height: 34px;
+
+  padding: 7px 11px;
+
+  font-size: 13px;
+}
+
+/* =========================================================
+   안내 / 오류
+   ========================================================= */
+
+.hint {
+  margin: 12px 0 0;
+
+  color: #858d99;
+
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.error {
+  margin: 12px 0 0;
+
+  padding: 10px 12px;
+
+  color: #ff9da8;
+
+  background: #351c21;
+
+  border: 1px solid #633039;
+  border-radius: 10px;
+
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* =========================================================
+   분석 화면
    ========================================================= */
 
 /*
-   분석 화면에서는 체스판 영역을 고정하고
-   아래의 수순 / 평가 / 사람의 관점만 스크롤한다.
+   분석 화면이 열리면 제목 영역을 숨긴다.
+   체스판을 화면의 가장 위에서 시작시키기 위한 처리.
 */
 
-#analysisView {
-  height: 100%;
-  min-height: 0;
+.app:has(#analysisView:not([hidden])) {
+  height: 100dvh;
+  min-height: 100dvh;
+
+  padding: 0;
+
+  overflow: hidden;
 }
 
-.analysis-layout {
-  display: flex;
-  flex-direction: column;
+.app:has(#analysisView:not([hidden])) .topbar {
+  display: none;
+}
 
-  height: 100vh;
+/* =========================================================
+   분석 전체 구조
+   ========================================================= */
+
+#analysisView {
+  width: 100%;
   height: 100dvh;
 
   min-height: 0;
+
+  overflow: hidden;
+}
+
+.analysis-layout {
+  width: 100%;
+  height: 100dvh;
+
+  min-height: 0;
+
+  display: flex;
+  flex-direction: column;
+
   overflow: hidden;
 }
 
@@ -154,12 +343,10 @@ main {
   width: 100%;
 
   padding: 8px;
+
   box-sizing: border-box;
 }
 
-/*
-   boardCard 자체는 내용 높이만 사용한다.
-*/
 .board-section .boardCard {
   width: 100%;
   max-width: 620px;
@@ -167,19 +354,152 @@ main {
   margin-left: auto;
   margin-right: auto;
 
-  box-sizing: border-box;
+  padding: 10px;
 }
 
-/*
-   체스판 크기
-   기존 .board의 8×8 구조를 유지한다.
-*/
-.board-section .board {
+/* =========================================================
+   섹션 제목
+   ========================================================= */
+
+.sectionTitle {
+  display: flex;
+
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 12px;
+
+  margin-bottom: 10px;
+}
+
+.sectionTitle strong {
+  font-size: 15px;
+}
+
+.sectionTitle > div {
+  min-width: 0;
+
+  display: flex;
+  align-items: center;
+
+  gap: 10px;
+}
+
+.sectionTitle span {
+  color: #8e96a3;
+
+  font-size: 13px;
+}
+
+/* =========================================================
+   체스판
+   ========================================================= */
+
+.board {
   width: 100%;
   max-width: 620px;
 
+  aspect-ratio: 1 / 1;
+
   margin-left: auto;
   margin-right: auto;
+
+  display: grid;
+
+  grid-template-columns:
+    repeat(8, minmax(0, 1fr));
+
+  grid-template-rows:
+    repeat(8, minmax(0, 1fr));
+
+  overflow: hidden;
+
+  border: 2px solid #343944;
+  border-radius: 12px;
+}
+
+/* =========================================================
+   체스판 칸
+   ========================================================= */
+
+.sq {
+  width: 100%;
+  height: 100%;
+
+  min-width: 0;
+  min-height: 0;
+
+  display: grid;
+  place-items: center;
+
+  font-family:
+    "Arial Unicode MS",
+    "Noto Sans Symbols 2",
+    system-ui,
+    sans-serif;
+
+  font-size: clamp(
+    26px,
+    8vw,
+    58px
+  );
+
+  line-height: 1;
+
+  user-select: none;
+
+  overflow: hidden;
+}
+
+/*
+   밝은 칸
+*/
+.sq.light {
+  background: #d8d3c8;
+  color: #111318;
+}
+
+/*
+   어두운 칸
+*/
+.sq.dark {
+  background: #73706a;
+  color: #111318;
+}
+
+/*
+   기물 자체가 너무 커지는 것을 방지
+*/
+.sq span {
+  display: block;
+
+  max-width: 100%;
+  max-height: 100%;
+
+  line-height: 1;
+}
+
+/* =========================================================
+   체스판 아래 버튼
+   ========================================================= */
+
+.navButtons {
+  display: grid;
+
+  grid-template-columns:
+    repeat(4, minmax(0, 1fr));
+
+  gap: 6px;
+
+  margin-top: 10px;
+}
+
+.navButtons button {
+  min-width: 0;
+
+  padding: 9px 4px;
+
+  font-size: 13px;
 }
 
 /* =========================================================
@@ -191,20 +511,21 @@ main {
 
   min-height: 0;
 
+  width: 100%;
+
   overflow-y: auto;
   overflow-x: hidden;
 
   -webkit-overflow-scrolling: touch;
 
-  padding: 8px;
-  box-sizing: border-box;
+  overscroll-behavior-y: contain;
+  overscroll-behavior-x: none;
 
-  overscroll-behavior: contain;
+  padding: 8px;
+
+  box-sizing: border-box;
 }
 
-/*
-   수순 / 평가 / 사람의 관점 카드의 폭
-*/
 .analysis-scroll > * {
   width: 100%;
   max-width: 620px;
@@ -216,41 +537,310 @@ main {
 }
 
 /* =========================================================
-   모바일 터치 스크롤
+   수순
    ========================================================= */
 
-.analysis-scroll {
-  scrollbar-width: thin;
-
-  overscroll-behavior-y: contain;
-  overscroll-behavior-x: none;
+.movesCard {
+  margin-bottom: 10px;
 }
 
-.analysis-scroll * {
-  overscroll-behavior-x: none;
+.moveList {
+  display: flex;
+
+  flex-wrap: wrap;
+
+  gap: 6px;
+
+  max-height: 180px;
+
+  overflow-y: auto;
+
+  padding: 2px;
+
+  -webkit-overflow-scrolling: touch;
+}
+
+.moveItem {
+  min-width: 44px;
+
+  padding: 7px 9px;
+
+  background: #242831;
+
+  border: 1px solid #343944;
+  border-radius: 8px;
+
+  color: #dce0e6;
+
+  font-size: 13px;
+
+  cursor: pointer;
+}
+
+.moveItem:hover {
+  background: #303540;
+}
+
+.moveItem.active {
+  background: #f1f3f5;
+  color: #111318;
+
+  border-color: #f1f3f5;
 }
 
 /* =========================================================
-   작은 화면
+   평가 영역
+   ========================================================= */
+
+.insightCard {
+  margin-bottom: 20px;
+}
+
+.evalRow {
+  display: flex;
+
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 16px;
+}
+
+.evalRow > div {
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 4px;
+}
+
+.muted {
+  color: #8e96a3;
+
+  font-size: 12px;
+}
+
+#evalValue,
+#depthValue {
+  font-size: 24px;
+
+  line-height: 1;
+
+  font-variant-numeric: tabular-nums;
+}
+
+.depthBox {
+  text-align: right;
+}
+
+/* =========================================================
+   분석 진행률
+   ========================================================= */
+
+.progress {
+  width: 100%;
+  height: 6px;
+
+  margin-top: 14px;
+
+  overflow: hidden;
+
+  background: #292d35;
+
+  border-radius: 999px;
+}
+
+#progressBar {
+  width: 0%;
+  height: 100%;
+
+  background: #dfe3e8;
+
+  border-radius: inherit;
+
+  transition: width 0.15s ease;
+}
+
+/* =========================================================
+   현재 포지션 설명
+   ========================================================= */
+
+.insight {
+  margin: 14px 0 18px;
+
+  color: #d5d9df;
+
+  font-size: 14px;
+
+  line-height: 1.65;
+}
+
+/* =========================================================
+   후보 수
+   ========================================================= */
+
+.candidateTitle {
+  margin-top: 6px;
+}
+
+.candidates {
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 8px;
+
+  margin-bottom: 18px;
+}
+
+.candidate {
+  padding: 12px;
+
+  background: #20242b;
+
+  border: 1px solid #303641;
+  border-radius: 10px;
+}
+
+.candidate strong {
+  display: block;
+
+  margin-bottom: 4px;
+
+  color: #f1f3f5;
+
+  font-size: 14px;
+}
+
+.candidate span {
+  color: #aab1bc;
+
+  font-size: 13px;
+
+  line-height: 1.5;
+}
+
+/* =========================================================
+   사람의 관점
+   ========================================================= */
+
+.factors {
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 8px;
+}
+
+.factor {
+  padding: 12px;
+
+  background: #20242b;
+
+  border: 1px solid #303641;
+  border-radius: 10px;
+}
+
+.factor strong {
+  display: block;
+
+  margin-bottom: 5px;
+
+  color: #f1f3f5;
+
+  font-size: 14px;
+}
+
+.factor p {
+  margin: 0;
+
+  color: #aab1bc;
+
+  font-size: 13px;
+
+  line-height: 1.6;
+}
+
+/* =========================================================
+   모바일
    ========================================================= */
 
 @media (max-width: 700px) {
 
+  .app {
+    padding: 12px;
+  }
+
+  .topbar {
+    align-items: flex-start;
+
+    flex-direction: column;
+
+    margin-bottom: 14px;
+  }
+
+  .topbar h1 {
+    font-size: 30px;
+  }
+
+  .topbar p {
+    font-size: 14px;
+  }
+
+  .status {
+    font-size: 12px;
+  }
+
+  .card {
+    padding: 12px;
+
+    border-radius: 12px;
+  }
+
+  #pgnInput {
+    min-height: 220px;
+  }
+
   .board-section {
     padding: 6px;
+  }
+
+  .board-section .boardCard {
+    max-width: none;
+
+    padding: 8px;
+  }
+
+  .board {
+    width: 100%;
+    max-width: none;
+
+    border-radius: 8px;
+  }
+
+  .sq {
+    font-size: clamp(
+      25px,
+      11vw,
+      48px
+    );
   }
 
   .analysis-scroll {
     padding: 6px;
   }
 
-  .board-section .boardCard {
-    max-width: none;
+  .navButtons {
+    gap: 5px;
   }
 
-  .board-section .board {
-    width: 100%;
-    max-width: none;
+  .navButtons button {
+    font-size: 12px;
+
+    padding: 8px 2px;
+  }
+
+  .moveList {
+    max-height: 150px;
   }
 
 }
@@ -265,8 +855,20 @@ main {
     padding: 4px;
   }
 
+  .board-section .boardCard {
+    padding: 6px;
+  }
+
   .analysis-scroll {
     padding: 4px;
+  }
+
+  .sq {
+    font-size: 26px;
+  }
+
+  .navButtons button {
+    font-size: 11px;
   }
 
 }
